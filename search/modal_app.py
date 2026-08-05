@@ -46,8 +46,8 @@ app = modal.App("farmermaxxing", image=image)
     cpu=1.0,
     memory=2048,
     timeout=3600,
-    max_containers=1000,
-    min_containers=96,
+    max_containers=int(os.environ.get('FM_MAX_CONTAINERS', '250')),
+    min_containers=int(os.environ.get('FM_MIN_CONTAINERS', '8')),
     scaledown_window=600,
     retries=2,
 )
@@ -77,11 +77,12 @@ class Scorer:
         across the pool instead of queuing behind each other.
         """
         from params import unflatten
-        from sim.harness import play, make_agent
+        from sim.fastplay import fast_play
+        from sim.harness import make_agent
 
         me = make_agent(unflatten(vec))
         a, b = (me, opponent) if seat == 0 else (opponent, me)
-        r = play(a, b, seed=seed, steps=steps)
+        r = fast_play(a, b, seed=seed, steps=steps)
         return {"bank": r["banks"][seat],
                 "opp_bank": r["banks"][1 - seat],
                 "status": r["statuses"][seat]}

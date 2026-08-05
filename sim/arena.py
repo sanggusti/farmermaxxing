@@ -20,13 +20,19 @@ import statistics
 import sys
 
 from sim.harness import play, make_agent
+from sim.fastplay import fast_play
 from sim.opponents import resolve_pool
 from params import Params
 from obs import wandb_setup
 
 
-def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None):
+def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None,
+             fast=True):
     """Play params against each opponent across seeds, from both seats.
+
+    `fast` uses sim.fastplay, which skips kaggle_environments' replay
+    bookkeeping and is ~3.3x quicker for identical results (see
+    tests/test_fastplay.py). Set fast=False when a replay is needed.
 
     `opponents` may hold built-in names or Params instances. `labels` gives the
     display name for each; without it, Params opponents are all labelled the
@@ -42,7 +48,8 @@ def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None):
             for seat in (0, 1):
                 me = make_agent(params)
                 a, b = (me, opp) if seat == 0 else (opp, me)
-                r = play(a, b, seed=seed, steps=steps)
+                runner = fast_play if fast else play
+                r = runner(a, b, seed=seed, steps=steps)
 
                 my_bank = r["banks"][seat]
                 their_bank = r["banks"][1 - seat]
