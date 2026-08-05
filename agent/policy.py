@@ -290,8 +290,18 @@ class Policy:
     def _wanted_crop(self, counts, crops, day, scale=1):
         """Which crop a free tile should get, or None.
 
-        Targets are per-quadrant and scale with the land we own, so a bought
-        quadrant fills up instead of lying fallow.
+        Picks the crop with the largest *relative* shortfall rather than the
+        first one under target. Returning the first under target starves
+        everything below it in the list: one-time crops vacate their tile when
+        harvested, so melon drops under target on every cycle and monopolises
+        every free tile forever. Measured on the ladder, a champion configured
+        for 26 carrot and 8 tomato tiles planted tomato zero times all season.
+
+        Relative shortfall fixes the comparison: melon at 8 of 10 (0.20 short)
+        correctly loses to carrot at 0 of 26 (1.00 short).
+
+        Targets are per-quadrant and scale with owned land, so a bought quadrant
+        fills up instead of lying fallow.
         """
         p = self.p
         days_left = TOTAL_DAYS - day
@@ -302,14 +312,19 @@ class Policy:
             ("TOMATO", p.target_tomato_tiles),
             ("STRAWBERRY", p.target_strawberry_tiles),
         ]
+
+        best, best_short = None, 0.0
         for crop, target in targets:
-            if crops[crop] >= target * scale:
+            want = target * scale
+            if want <= 0 or crops[crop] >= want:
                 continue
             # Don't plant what cannot mature before the season ends.
             if CROPS[crop]["first_yield_day"] + p.plant_cutoff_slack > days_left:
                 continue
-            return crop
-        return None
+            shortfall = (want - crops[crop]) / want
+            if shortfall > best_short:
+                best, best_short = crop, shortfall
+        return best
 
     # ------------------------------------------------------------ assignment
     def _assign(self, units, tasks, board):
@@ -376,8 +391,11 @@ class Policy:
         market_inv = obs["market"]["inventory"]
         scale = len(me["unlocked_quadrants"])
 
-        # 1. Labour, first thing each day. Hands act from the following turn.
-        if hour == 0:
+        # 1. Labour, at the start of each day. Hands act from the following
+        # turn. Spread across the first few turns because market orders are
+        # truncated at MAX_MARKET_ORDERS, so hiring only at hour 0 silently
+        # capped the whole farm at 10 hands however high the target was.
+        if hour < p.hire_turns:
             target = self._hand_target(day)
             for _ in range(target - me["hires_today"]):
                 cost = fib_hire_cost(me["hires_today"] + len(orders))

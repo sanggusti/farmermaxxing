@@ -18,6 +18,9 @@ class Params:
     hands_early: int = 6          # days 0-4
     hands_mid: int = 10           # days 5-14
     hands_late: int = 14          # days 15+
+    # Turns at the start of each day during which hiring orders are issued.
+    # Must be >1 for any target above MAX_MARKET_ORDERS to be reachable.
+    hire_turns: int = 2
 
     # --- land ---------------------------------------------------------------
     # Quadrants cost 1000 / 2000 / 4000. Buy only with a cash cushion left over.
@@ -136,6 +139,7 @@ SEARCH_SPACE = {
     "hands_early":            (0, 16, "i"),
     "hands_mid":              (0, 18, "i"),
     "hands_late":             (0, 18, "i"),
+    "hire_turns":             (1, 4, "i"),
 
     "land_buy_reserve":       (0, 6000, "f"),
     "land_buy_empty_max":     (0, 25, "i"),
