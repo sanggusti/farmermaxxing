@@ -19,7 +19,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .uv_pip_install("kaggle-environments==1.32.4", "wandb>=0.28.1")
+    .uv_pip_install("kaggle-environments==1.32.4")
+    .env({"WANDB_MODE": "disabled"})   # workers just return numbers
     .add_local_dir(os.path.join(REPO, "agent"), remote_path="/root/agent")
     .add_local_dir(os.path.join(REPO, "sim"), remote_path="/root/sim")
     .add_local_dir(os.path.join(REPO, "obs"), remote_path="/root/obs")
@@ -28,16 +29,15 @@ image = (
 app = modal.App("farmermaxxing", image=image)
 
 
-@app.function(
-    cpu=1.0,
-    memory=2048,
-    timeout=1800,
-    max_containers=200,
-    retries=2,
-    secrets=[modal.Secret.from_name("wandb", required_keys=["WANDB_API_KEY"])],
-)
+@app.function(cpu=1.0, memory=2048, timeout=1800, max_containers=200, retries=2)
 def score_one(vec, seeds, opponent, steps):
-    """Score a single candidate. Returns the same dict `arena.summarise` gives."""
+    """Score a single candidate. Returns the same dict `arena.summarise` gives.
+
+    Workers deliberately do no W&B logging -- they return stats and the driver
+    logs one row per generation. Hundreds of containers each opening their own
+    run would bury the signal, and a preempted container would leave a dangling
+    "running" run behind.
+    """
     import sys
 
     sys.path[:0] = ["/root", "/root/agent"]

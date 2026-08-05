@@ -48,6 +48,14 @@ class Params:
     # or units end up idle waiting on seed.
     seed_batch: int = 12
 
+    # Fertilizer doubles the daily yield bonus for 3 days. Wheat and carrot
+    # only reach their listed max yield (6 and 4) with it, and a fertilized
+    # melon caps two days early. Against that, a unit of fertilizer sells for
+    # ~$100. Off by default; let the search decide.
+    fertilize_enabled: int = 0
+    # Only spend fertilizer down to this reserve, so selling still happens.
+    fertilize_min_stock: int = 6
+
     # Stop planting slow crops once they cannot mature before the season ends.
     plant_cutoff_slack: int = 1
 
@@ -94,6 +102,7 @@ class Params:
     prio_build: float = 25.0
     prio_plant: float = 22.0
     prio_dig: float = 45.0
+    prio_fertilize: float = 18.0
     distance_penalty: float = 3.0
 
     def to_json(self, path):
@@ -166,6 +175,9 @@ SEARCH_SPACE = {
     "prio_build":               (0, 140, "f"),
     "prio_plant":               (0, 140, "f"),
     "prio_dig":                 (0, 140, "f"),
+    "prio_fertilize":           (0, 140, "f"),
+    "fertilize_enabled":        (0, 1, "i"),
+    "fertilize_min_stock":      (0, 40, "i"),
     "distance_penalty":         (0.0, 15.0, "f"),
 }
 

@@ -132,6 +132,11 @@ class Policy:
         # are silently dropped and the farm deadlocks -- forever, since nothing
         # about the state changes to break the tie.
         plant_budget = seeds.get(want, 0) if want else 0
+        # Fertilizer above the reserve is available for field use; the rest
+        # stays earmarked for sale.
+        carried = self._carried(private)
+        spare_fert = max(0, shed.get('FERTILIZER', 0)
+                         + carried.get('FERTILIZER', 0) - p.fertilize_min_stock)
 
         for y, row in enumerate(me["tiles"]):
             for x, tile in enumerate(row):
@@ -154,7 +159,7 @@ class Policy:
                     tasks.append(Task(p.prio_dig, pos, ["DIG"], "dig"))
 
                 elif kind == "PLANT":
-                    tasks += self._plant_tasks(tile, pos, day)
+                    tasks += self._plant_tasks(tile, pos, day, spare_fert)
 
                 elif "animal" in tile:
                     tasks += self._animal_tasks(tile, pos)
@@ -203,6 +208,12 @@ class Policy:
                     ["PICKUP", name, 1], f"fetch-{name}",
                 ))
 
+        # Fertilizer for field use, when the search has enabled it.
+        spare_fert = max(0, shed.get("FERTILIZER", 0) - p.fertilize_min_stock)
+        if p.fertilize_enabled and spare_fert > 0 and carried.get("FERTILIZER", 0) == 0:
+            tasks.append(Task(p.prio_fertilize + 1, access[0],
+                              ["PICKUP", "FERTILIZER", 4], "fetch-FERTILIZER"))
+
         # Wheat for animals that still need feeding today.
         unfed = self._count_unfed(me)
         if unfed > carried.get("WHEAT", 0) and shed.get("WHEAT", 0) > 0:
@@ -223,7 +234,7 @@ class Policy:
                     n += 1
         return n
 
-    def _plant_tasks(self, tile, pos, day):
+    def _plant_tasks(self, tile, pos, day, spare_fertilizer=0):
         p = self.p
         out = []
         crop = tile["crop"]
@@ -234,6 +245,17 @@ class Policy:
             # Watering is only *useful* inside the bonus window, but it is
             # always *necessary* -- two dry days turns the tile into a weed.
             out.append(Task(p.prio_water, pos, ["WATER"], "water"))
+
+        # Fertilize only where it pays: inside (or just before) the bonus
+        # window, and only while the plant is not already covered. The engine
+        # applies the bonus for day..day+2, and only on days the plant is also
+        # watered.
+        if p.fertilize_enabled and spare_fertilizer > 0 and tile["fertilized_until_day"] < day:
+            window = water_bonus_window(crop)
+            in_window = (window is None) or (age >= window[0] - 1 and age <= window[1])
+            if in_window:
+                out.append(Task(p.prio_fertilize, pos, ["FERTILIZE"], "fertilize",
+                                needs="FERTILIZER"))
 
         ripe = tile.get("yield_units", 0) > 0 and age >= cd["first_yield_day"]
         if ripe:
