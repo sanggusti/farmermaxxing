@@ -58,3 +58,41 @@ def test_short_episode_matches():
     slow = play(make_agent(params), "pass", seed=3, steps=120)
     fast = fast_play(make_agent(params), "pass", seed=3, steps=120)
     assert fast["banks"] == slow["banks"]
+
+
+@pytest.mark.slow
+def test_frozen_params_opponent_actually_plays():
+    """A Params opponent must be resolved, not silently passed through.
+
+    fast_play resolved built-in names but let a Params instance through
+    uncalled, so every frozen champion became a no-op: the episode finished,
+    the numbers looked plausible, and the opponent never played. Measured at the
+    time, same seed: env.run gave [39,969, 15,949] and fast_play [118,385, 3,000].
+
+    The tell is the opponent banking its 3,000 starting money untouched.
+    """
+    import os
+
+    from sim.harness import play
+
+    pool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "sim", "opponents")
+    snapshots = sorted(f for f in os.listdir(pool)) if os.path.isdir(pool) else []
+    if not snapshots:
+        pytest.skip("no frozen opponents to check against")
+
+    opponent = Params.from_json(os.path.join(pool, snapshots[0]))
+    slow = play(make_agent(Params()), opponent, seed=20000, steps=720)
+    fast = fast_play(make_agent(Params()), opponent, seed=20000, steps=720)
+
+    assert fast["banks"] == slow["banks"], (
+        f"fast_play {fast['banks']} != env.run {slow['banks']}; "
+        "the frozen opponent is probably not being resolved"
+    )
+    assert fast["banks"][1] != 3000.0, "opponent never acted"
+
+
+def test_unresolvable_opponent_raises_rather_than_going_quiet():
+    """Failing loudly beats a plausible-looking wrong number."""
+    with pytest.raises(TypeError, match="not callable"):
+        fast_play(make_agent(Params()), object(), seed=0, steps=48)

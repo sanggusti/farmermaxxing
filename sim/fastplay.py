@@ -24,6 +24,35 @@ if os.path.join(REPO, "agent") not in sys.path:
     sys.path.insert(0, os.path.join(REPO, "agent"))
 
 
+def _resolve(spec, engine):
+    """Built-in name, Params, or callable -> callable.
+
+    Anything else raises. make_agent() would happily wrap an arbitrary object
+    and hand back a callable that only fails once the episode is running, which
+    is the failure mode this whole function exists to prevent.
+    """
+    from params import Params
+    from sim.harness import make_agent
+
+    if isinstance(spec, str):
+        resolved = engine.agents.get(spec)
+        if resolved is None:
+            raise TypeError(
+                f"unknown built-in agent {spec!r}; "
+                f"expected one of {sorted(engine.agents)}"
+            )
+        return resolved
+    if isinstance(spec, Params):
+        return make_agent(spec)
+    if callable(spec):
+        return spec
+    raise TypeError(
+        f"opponent is {type(spec).__name__}, not callable, a Params or a "
+        "built-in agent name. An unresolved opponent silently does nothing "
+        "for the whole episode instead of erroring."
+    )
+
+
 def fast_play(agent_a, agent_b, seed=0, steps=720):
     """Play one episode and return {'banks', 'winner', 'statuses'}.
 
@@ -36,12 +65,12 @@ def fast_play(agent_a, agent_b, seed=0, steps=720):
     env = make("kaggriculture", configuration={"episodeSteps": steps, "seed": seed})
     env.reset(2)
     state = env.state
-    # Built-in opponents arrive as names ("starter", "pass", "random"). Passing
-    # the string straight through makes every call raise, which the loop below
-    # turns into a silent no-op opponent, so the episode still finishes and the
-    # numbers look plausible while the opponent never plays.
-    agents = [engine.agents.get(a, a) if isinstance(a, str) else a
-              for a in (agent_a, agent_b)]
+    # Opponents arrive as built-in names ("starter"), Params instances (frozen
+    # champions), or callables. Anything not resolved to a callable raises on
+    # every turn, which the loop below turns into a silent no-op opponent: the
+    # episode finishes, the numbers look plausible, and the opponent never
+    # played. That happened to every frozen Params opponent (issue #56).
+    agents = [_resolve(a, engine) for a in (agent_a, agent_b)]
 
     # Name-mangled because core.py has no public accessor. This merges the
     # fields marked `shared` in the env spec (farms, market, town) from state[0]
