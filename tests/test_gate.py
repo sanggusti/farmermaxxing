@@ -76,3 +76,30 @@ def test_identical_params_do_not_pass_end_to_end():
     checks, *_ = run_gate(p, p, "starter", n_seeds=2, steps=120)
     assert find(checks, "sigma") is False
     assert len(checks) == 4
+
+
+def test_gate_defaults_to_clean_seeds_not_selection_seeds():
+    """The gate must not judge a candidate on the seeds that selected it.
+
+    CEM picks its champion on the HOLDOUT range once per generation. Judging on
+    that same range asks the search to mark its own work, and the score it
+    produces is biased upward by construction.
+    """
+    import inspect
+    from sim import gate
+
+    default = inspect.signature(gate.run_gate).parameters["offset"].default
+    assert default == gate.CLEAN_OFFSET
+    assert gate.CLEAN_OFFSET != gate.HOLDOUT_OFFSET
+
+
+def test_seed_ranges_do_not_overlap():
+    """Train, selection and clean seeds must be disjoint for any sane count."""
+    from sim import gate
+
+    train = set(range(0, 1000))
+    selection = set(range(gate.HOLDOUT_OFFSET, gate.HOLDOUT_OFFSET + 1000))
+    clean = set(range(gate.CLEAN_OFFSET, gate.CLEAN_OFFSET + 1000))
+    assert not (train & selection)
+    assert not (train & clean)
+    assert not (selection & clean)

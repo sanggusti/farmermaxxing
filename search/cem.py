@@ -90,7 +90,15 @@ def modal_session():
     return session()
 
 
-HOLDOUT_OFFSET = 10_000   # keeps holdout seeds far from any train seed
+HOLDOUT_OFFSET = 10_000   # selection seeds: used to pick the champion
+CLEAN_OFFSET = 20_000     # reporting seeds: never used to optimise or select
+
+# Three sets, because two is not enough. Train fits the parameters. Holdout
+# picks the champion, once per generation, which makes it a selection set:
+# repeatedly taking the max over a noisy 16-episode measurement biases it
+# upward, and the bias grows with generation count. Clean seeds are touched
+# exactly once, at the end, so the number they produce is not something the
+# search was ever allowed to chase.
 
 
 def main():
@@ -100,7 +108,9 @@ def main():
     ap.add_argument("--elite-frac", type=float, default=0.25)
     ap.add_argument("--seeds", type=int, default=4, help="train seeds")
     ap.add_argument("--holdout-seeds", type=int, default=6,
-                    help="disjoint seeds used only to select and report")
+                    help="disjoint seeds used to select the champion")
+    ap.add_argument("--clean-seeds", type=int, default=8,
+                    help="seeds touched only once, for an unbiased final number")
     ap.add_argument("--steps", type=int, default=720)
     ap.add_argument("--opponent", default="starter")
     ap.add_argument("--modal", action="store_true", help="fan out on Modal")
@@ -120,6 +130,7 @@ def main():
     rng = random.Random(args.rng_seed)
     train_seeds = list(range(args.seeds))
     holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
+    clean_seeds = [CLEAN_OFFSET + i for i in range(args.clean_seeds)]
     if args.init_params:
         base = Params.from_json(args.init_params)
         spread = args.init_spread if args.init_spread is not None else 0.10
@@ -199,13 +210,32 @@ def main():
                   f"gap {row['generalisation_gap']:>10,.0f}  "
                   f"win {champion_stats['win_rate']:.0%}")
 
+        # One evaluation on seeds the search never saw. The difference against
+        # the selection score IS the selection bias, so measure it rather than
+        # arguing about whether it exists.
+        clean = None
+        if best_vec is not None:
+            clean = score([best_vec], clean_seeds, args.opponent, args.steps)[0]
+            run.summary["clean_bank"] = clean["mean_bank"]
+            run.summary["clean_min_bank"] = clean["min_bank"]
+            run.summary["selection_bias"] = best_holdout - clean["mean_bank"]
+
         run.summary["best_holdout_bank"] = best_holdout
         run.summary["best_train_bank"] = best_train
         if best_vec is not None:
             wandb_setup.log_params_artifact(
                 run, best_path, metadata={"holdout_mean_bank": best_holdout})
 
-    print(f"\nbest holdout mean bank {best_holdout:,.0f} -> {best_path}")
+    print(f"\nselection holdout : {best_holdout:>12,.0f}")
+    if clean is not None:
+        bias = best_holdout - clean["mean_bank"]
+        print(f"clean (unbiased)  : {clean['mean_bank']:>12,.0f}  "
+              f"worst {clean['min_bank']:,.0f}")
+        print(f"selection bias    : {bias:>+12,.0f}  "
+              f"({bias / clean['mean_bank']:+.1%} of the clean score)")
+        print("\nQuote the clean number. The selection score is what the search")
+        print("optimised toward and is biased upward by construction.")
+    print(f"\n{best_path}")
     print(f"promote with:  make promote FROM={best_path}")
 
 
