@@ -1,0 +1,21 @@
+[project]
+name = "farmermaxxing"
+version = "0.1.0"
+description = "Agent for the Kaggle Kaggriculture simulation competition"
+requires-python = ">=3.12"
+dependencies = [
+    # Pinned: the engine is under active development and rule changes land weekly.
+    # `make check-engine` diffs this pin against upstream master.
+    "kaggle-environments==1.32.4",
+    "wandb>=0.28.1",
+    "modal>=1.5.3",
+    "kaggle>=1.7.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: longer-running checks (timing, full episodes)"]
+addopts = "-m 'not slow'"
