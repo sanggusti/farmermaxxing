@@ -8,6 +8,7 @@ Set WANDB_MODE=disabled to turn tracking off entirely (tests do this).
 """
 
 import os
+import signal
 import socket
 
 PROJECT = os.environ.get("WANDB_PROJECT", "farmermaxxing")
@@ -43,6 +44,41 @@ def enabled():
     return os.environ.get("WANDB_MODE", "online") != "disabled"
 
 
+def _finish_on_signal(run):
+    """Close the run cleanly when the process is signalled.
+
+    The context manager calls finish() on normal exit and on exceptions, but a
+    signal bypasses both, so every search stopped with pkill was recorded as
+    `crashed`. A dozen such runs accumulated while diagnosing the container cap,
+    implying failures that were actually deliberate stops.
+
+    Chains to the previous handler so this does not swallow anyone else's.
+    """
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous = signal.getsignal(sig)
+        except (ValueError, OSError):
+            continue
+
+        def handler(signum, frame, _prev=previous):
+            try:
+                run.finish(exit_code=0)
+            except Exception:
+                pass
+            if callable(_prev) and _prev not in (signal.SIG_IGN, signal.SIG_DFL):
+                _prev(signum, frame)
+            elif signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            else:
+                raise SystemExit(128 + signum)
+
+        try:
+            signal.signal(sig, handler)
+        except ValueError:
+            # Not the main thread (Modal workers); nothing to install.
+            pass
+
+
 def start(job_type, config=None, group=None, name=None, tags=None):
     """Open a run. Always use as a context manager:
 
@@ -51,6 +87,7 @@ def start(job_type, config=None, group=None, name=None, tags=None):
 
     The `with` form matters on Modal: if a container is preempted mid-run,
     __exit__ still calls finish() and the run doesn't hang in "running" forever.
+    Signals are handled separately, see `_finish_on_signal`.
     """
     if not enabled():
         return _NullRun()
@@ -60,7 +97,7 @@ def start(job_type, config=None, group=None, name=None, tags=None):
 
     import wandb
 
-    return wandb.init(
+    run = wandb.init(
         project=PROJECT,
         job_type=job_type,
         group=group,
@@ -70,6 +107,8 @@ def start(job_type, config=None, group=None, name=None, tags=None):
         settings=wandb.Settings(host=socket.gethostname()),
         reinit=True,
     )
+    _finish_on_signal(run)
+    return run
 
 
 def table(columns):
