@@ -1,4 +1,5 @@
 {
+  "_notes": "CEM v3 on corrected code; 109,606 clean, 125,911 selection (14.9% bias)",
   "animal_cash_reserve": 222.85183559853263,
   "distance_penalty": 13.002102663291733,
   "fertilize_enabled": 0,
