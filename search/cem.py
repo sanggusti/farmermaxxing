@@ -31,7 +31,13 @@ sys.path[:0] = [REPO, os.path.join(REPO, "agent")]
 from params import Params, SEARCH_SPACE, flatten, unflatten   # noqa: E402
 from obs import wandb_setup                                    # noqa: E402
 
-BEST_PATH = os.path.join(REPO, "agent", "params.json")
+# Searches write to their own run directory, never straight to the tracked
+# agent/params.json. Writing into the working tree means a concurrent command
+# can clobber a running search (this happened), `git add -A` commits whatever
+# intermediate set is on disk (this also happened, in PR #15), two searches
+# cannot run at once, and nothing records which run produced the file.
+# Promotion into agent/params.json is a deliberate separate step.
+RUNS_DIR = os.path.join(REPO, "runs")
 
 
 def initial_distribution(base, spread=0.25):
@@ -129,6 +135,9 @@ def main():
     n_elite = max(2, int(args.population * args.elite_frac))
 
     group = args.group or f"cem-g{args.generations}-p{args.population}"
+    run_dir = os.path.join(RUNS_DIR, group)
+    os.makedirs(run_dir, exist_ok=True)
+    best_path = os.path.join(run_dir, "best_params.json")
     # Selection is on HOLDOUT, never on train. With 41 free parameters and a
     # handful of seeds, the train score is a fitting artefact; the ladder scores
     # us on episodes we have never seen.
@@ -164,7 +173,7 @@ def main():
                 best_holdout = champion_stats["mean_bank"]
                 best_vec = champion_vec
                 best_train = ranked[0][0]["mean_bank"]
-                unflatten(best_vec).to_json(BEST_PATH)
+                unflatten(best_vec).to_json(best_path)
 
             new_mean, new_std = refit(elites)
             mean = {k: (1 - 0.3) * new_mean[k] + 0.3 * mean[k] for k in mean}
@@ -194,9 +203,10 @@ def main():
         run.summary["best_train_bank"] = best_train
         if best_vec is not None:
             wandb_setup.log_params_artifact(
-                run, BEST_PATH, metadata={"holdout_mean_bank": best_holdout})
+                run, best_path, metadata={"holdout_mean_bank": best_holdout})
 
-    print(f"\nbest holdout mean bank {best_holdout:,.0f} -> {BEST_PATH}")
+    print(f"\nbest holdout mean bank {best_holdout:,.0f} -> {best_path}")
+    print(f"promote with:  make promote FROM={best_path}")
 
 
 if __name__ == "__main__":
