@@ -1,11 +1,11 @@
-# Kaggriculture — development notes
+# Kaggriculture, development notes
 
 Working document for the Kaggle [Kaggriculture](https://www.kaggle.com/competitions/kaggriculture)
 competition. Game breakdown, architecture walkthrough, how to run everything,
 and a dated log of what we tried.
 
 - **Entry deadline** 2026-09-23 · **Final submission** 2026-09-30
-- **Prizes** $50,000 — $5,000 each to the **top 10**
+- **Prizes** $50,000, $5,000 each to the **top 10**
 - **Limits** 5 submissions/day, only the latest 2 are scored
 
 ---
@@ -23,7 +23,7 @@ You control one farmer plus farm hands you re-hire each day. Each unit takes
 Almost nothing. Farms are independent; the only shared object is the **market**.
 A competitor's [seat-swap experiment](https://www.kaggle.com/competitions/kaggriculture/discussion/731152)
 got bit-identical banks from either seat, because the engine quotes both players
-against the same pre-commit inventory — there is no first-mover advantage.
+against the same pre-commit inventory, there is no first-mover advantage.
 
 This is the single most important strategic fact in the project: it makes
 Kaggriculture ~95% a **single-agent scheduling problem** and only ~5% a game.
@@ -36,13 +36,13 @@ Value density per tile-day, and how the price reacts to flooding the market:
 
 | Resource | Yield/tile/day | Base $ | $/tile/day | Glut behaviour (`above_func`/`target`) |
 |---|---|---|---|---|
-| Melon | 0.55 | 250 | **137** | `sq` / 3.60 — $1 floor at +T. Brutal. |
-| Milk | 0.50 | 160 | 80 | `linear` / 1.60 — $1 at +T |
-| Wool | 0.33 | 200 | 66 | `sq` / 3.20 — $1 at +T |
-| **Egg** | 1.00 | 50 | **50** | `log` / 0.20 — only $50→$40. **Resilient** |
-| Strawberry | 0.24 | 120 | 29 | `linear` / 1.60 — $1 at +T |
+| Melon | 0.55 | 250 | **137** | `sq` / 3.60, $1 floor at +T. Brutal. |
+| Milk | 0.50 | 160 | 80 | `linear` / 1.60, $1 at +T |
+| Wool | 0.33 | 200 | 66 | `sq` / 3.20, $1 at +T |
+| **Egg** | 1.00 | 50 | **50** | `log` / 0.20, only $50→$40. **Resilient** |
+| Strawberry | 0.24 | 120 | 29 | `linear` / 1.60, $1 at +T |
 | Carrot | 0.75 | 35 | 26 | `sqrt` / 0.70 |
-| Wheat | 0.80 | 25 | 20 | `log` / 0.20 — resilient |
+| Wheat | 0.80 | 25 | 20 | `log` / 0.20, resilient |
 | Tomato | 0.33 | 60 | 20 | `sqrt` / 0.60 |
 
 Melon looks dominant on raw value and is a trap if you dump it: `P(I0+T) = $1`.
@@ -58,7 +58,7 @@ Things the tables above don't show, which matter a lot:
 - **Wheat is a cost centre for livestock.** Every animal eats 1 wheat/day. Town
   shops constantly drain wheat, and wheat's *scarcity* curve is steep
   (`sqrt`/0.80), so its price climbs all season while egg prices sag. Buying
-  feed late-game can be value-destroying — hence `wheat_buy_max_price`.
+  feed late-game can be value-destroying, hence `wheat_buy_max_price`.
 - **Labour is cheap but not free.** Hire cost is `fib(n)` per day, resetting
   daily: 10 hands = 143 coins, but 16 hands = 2,583 and 20 hands = 17,710. The
   marginal hand stops paying for itself somewhere in the mid-teens.
@@ -76,27 +76,27 @@ confirmed **"engine is the source of truth"**
 Everything in `agent/rules.py` is transcribed from the engine source and
 verified by `tests/test_parity.py`.
 
-1. **Atomic PLANT validation** — the single worst trap. The engine computes
+1. **Atomic PLANT validation**, the single worst trap. The engine computes
    ```python
    blocked = {crop for crop, n in plant_demand.items() if n > seeds.get(crop, 0)}
    ```
    If more units issue `PLANT WHEAT` in a turn than you hold wheat seeds,
    **every one of them is silently dropped**. With 7 units and 2 seeds the farm
-   deadlocks permanently — nothing about the state changes to break the tie.
+   deadlocks permanently, nothing about the state changes to break the tie.
    Cost us a full run that scored 88 coins. `_build_tasks` now caps plant tasks
    at the seed count.
 2. **`__file__` does not exist inside an agent.** `kaggle_environments` loads
    agents via `exec(compile(raw, path), {})`. Touching `__file__` raises
-   NameError, which the loader swallows into `InvalidArgument` — the submission
+   NameError, which the loader swallows into `InvalidArgument`, the submission
    fails its validation episode. See `_agent_dir()` in `agent/main.py`.
 3. **The file loader takes the *last callable defined*,** not the one named
    `agent`. Define `agent` last, import nothing after it.
 4. A fresh seed starts at `consecutive_unwatered = 1`, so a seed planted and not
    watered the same day becomes a weed that night. No grace period.
-5. Melon caps at age 10; ages 11–12 are dead turns.
+5. Melon caps at age 10; ages 11-12 are dead turns.
 6. Wheat/carrot only reach their listed max yield **with fertilizer**.
 7. The shed is not a tile. Access tiles at `boardSize=10` are (4,4), (5,4),
-   (4,5), (5,5) — and three of them are **locked** until you buy land, while
+   (4,5), (5,5), and three of them are **locked** until you buy land, while
    `PICKUP` no-ops on a locked tile.
 8. Sales at the $1 floor do not add market supply, so the floor stays responsive.
 
@@ -119,9 +119,9 @@ simulation is wide-open ground (§7, milestone 6).
 The original brief assumed RL + PufferLib. The research said otherwise:
 
 - **Every** RL winner of a `kaggle_environments` competition rewrote the
-  simulator first — Lux S1, Lux S3, Orbit Wars 1st (Rust, ~2,400 B200-hours,
+  simulator first, Lux S1, Lux S3, Orbit Wars 1st (Rust, ~2,400 B200-hours,
   15B steps), Orbit Wars 3rd (JAX). Nobody trains against the Python env.
-- `kaggriculture.py` is 1,063 lines of fiddly dict mutation. A port is 2–4 weeks
+- `kaggriculture.py` is 1,063 lines of fiddly dict mutation. A port is 2-4 weeks
   with **silent** divergence risk, against a 7-week clock.
 - ~99% of actions are forced maintenance (water, feed, walk). The real decisions
   number a few hundred per episode. Model-free RL would spend its sample budget
@@ -139,8 +139,8 @@ So: heuristic policy → CEM parameter search → per-turn forward-sim planner.
 ## 3. Architecture
 
 ```
-agent/            the submission (flat imports — Kaggle unpacks it flat)
-  main.py         entry point; `agent` defined LAST; robust dir discovery
+agent/            the submission (flat imports, Kaggle unpacks it flat)
+  main.py         entry point; `agent` defined LAST; dir discovery that survives exec()
   policy.py       the brain: tasks -> greedy unit assignment -> market orders
   params.py       Params dataclass + SEARCH_SPACE (41 tunable scalars)
   market.py       price-curve port + sell scheduling
@@ -150,7 +150,7 @@ agent/            the submission (flat imports — Kaggle unpacks it flat)
 sim/              local evaluation
   harness.py      one definition of "play an episode"
   run.py          single episode + replay dump
-  trace.py        per-day X-ray — the main debugging view
+  trace.py        per-day X-ray, the main debugging view
   arena.py        holdout matrix, both seats, W&B logging
 
 search/
@@ -171,17 +171,17 @@ silent no-ops, that is worth far more than the microseconds.
 
 Each turn:
 
-1. **Scan** — what do I own, what does each tile need.
-2. **Build tasks** — every job worth doing, each with a priority and an
+1. **Scan**, what do I own, what does each tile need.
+2. **Build tasks**, every job worth doing, each with a priority and an
    optional required item (`FEED` needs wheat *in hand*).
-3. **Assign** — greedy: each unit takes its best `priority − distance × penalty`.
+3. **Assign**, greedy: each unit takes its best `priority − distance × penalty`.
    A Hungarian assignment is possible; greedy is within noise and far more
    readable.
-4. **Market** — hire, buy land, buy livestock/seed/feed, then sell.
+4. **Market**, hire, buy land, buy livestock/seed/feed, then sell.
 
 Fetch trips are first-class tasks. Without them, goods bought into the shed
 never reach a unit's hands, because a unit only wanders to the shed when it has
-nothing else to do — which on a busy farm is never.
+nothing else to do, which on a busy farm is never.
 
 ---
 
@@ -194,17 +194,17 @@ make setup                      # uv venv (3.12) + pinned deps
 `kaggle-environments` requires Python ≥3.11; the system `python3` here is
 3.10.4, so the venv is explicitly 3.12.
 
-**Kaggle** — accept the rules on the website, then put an API token in
+**Kaggle**, accept the rules on the website, then put an API token in
 `~/.kaggle/access_token` (`chmod 600`). Verify with `make status`.
 
-**W&B** — `~/.netrc` already authenticates the Python SDK. The MCP server needs
+**W&B**, `~/.netrc` already authenticates the Python SDK. The MCP server needs
 the key as a header, so export it for MCP use:
 
 ```bash
 export WANDB_API_KEY=...   # .mcp.json references ${WANDB_API_KEY}, never the literal
 ```
 
-**Modal** — `modal secret create wandb WANDB_API_KEY=...` so workers can log.
+**Modal**, `modal secret create wandb WANDB_API_KEY=...` so workers can log.
 
 ---
 
@@ -213,23 +213,23 @@ export WANDB_API_KEY=...   # .mcp.json references ${WANDB_API_KEY}, never the li
 | Command | What it does |
 |---|---|
 | `make play` | one episode vs `starter`, prints both banks |
-| `make trace` | **per-day X-ray** — cash, tiles, shed, prices. Start here when debugging |
+| `make trace` | **per-day X-ray**, cash, tiles, shed, prices. Start here when debugging |
 | `make arena` | holdout matrix vs frozen opponents, both seats |
 | `make arena WANDB=1` | same, logged to W&B |
 | `make test` | engine parity + submission contract |
-| `make check` | everything, including the timing test — gate before submitting |
+| `make check` | everything, including the timing test, gate before submitting |
 | `make search` | small local CEM |
 | `make search-modal` | the real CEM, fanned out on Modal |
 | `make bundle` | build `submission.tar.gz` (runs `make check` first) |
-| `make submit CONFIRM=1 M="..."` | submit — refuses without `CONFIRM=1` |
+| `make submit CONFIRM=1 M="..."` | submit, refuses without `CONFIRM=1` |
 | `make check-engine` | diff our pinned engine against upstream master |
 
 ### Two metrics, two jobs
 
-- **`mean_bank`** — near-deterministic and nearly opponent-independent, so it
+- **`mean_bank`**, near-deterministic and nearly opponent-independent, so it
   has much lower variance than a win/loss bit. **This is what CEM optimises**,
   and it is why a handful of seeds per candidate is enough.
-- **`win_rate`** — what the ladder actually scores. Used only as the final gate
+- **`win_rate`**, what the ladder actually scores. Used only as the final gate
   before a submission, never for tuning; at these sample sizes it is too noisy
   to steer on.
 
@@ -237,10 +237,10 @@ export WANDB_API_KEY=...   # .mcp.json references ${WANDB_API_KEY}, never the li
 
 Everything logs to W&B project `farmermaxxing`, via `obs/wandb_setup.py`:
 
-- `job_type="arena"` — one run per evaluation sweep, with a per-episode
+- `job_type="arena"`, one run per evaluation sweep, with a per-episode
   `wandb.Table` (opponent, seed, seat, bank, opp_bank, win, status) and summary
   metrics `mean_bank` / `median_bank` / `min_bank` / `stderr` / `win_rate` / `errors`.
-- `job_type="cem"` — one run per search, logging per generation:
+- `job_type="cem"`, one run per search, logging per generation:
   `best_bank`, `elite_mean_bank`, `pop_mean_bank`, `best_overall`. The winning
   `params.json` is attached as a versioned artifact.
 - Runs are grouped (`--group`) so a search and its evaluations line up.
@@ -253,7 +253,7 @@ Everything logs to W&B project `farmermaxxing`, via `obs/wandb_setup.py`:
 
 ## 6. Experiment log
 
-### 2026-08-05 — project set up, baseline agent working
+### 2026-08-05, project set up, baseline agent working
 
 Scaffold, engine pinned at `kaggle-environments==1.32.4` (verified identical to
 upstream master via `make check-engine`).
@@ -274,7 +274,7 @@ Bugs found, in order of damage:
    nothing to hire hands. With no hands nothing was watered or fed, so crops
    weeded over and the geese starved. Fixed with `animal_cash_reserve` plus a
    rule never to hold more livestock than there are empty structures.
-2. **Plant deadlock** (the atomic-validation trap above) — scored 88 coins.
+2. **Plant deadlock** (the atomic-validation trap above), scored 88 coins.
 3. **Weeds never cleared.** `prio_dig` was the lowest priority, so 41 of 75
    tiles ended the season as dead land. Raised to 45.
 4. **Shed pinned at its 100 cap** by 47 hoarded wheat + 44 unsold fertilizer, so
@@ -283,7 +283,7 @@ Bugs found, in order of damage:
 5. **Feed cost exceeded egg revenue** after ~day 22: wheat had climbed to $55
    while eggs sagged to $41. Added `wheat_buy_max_price`.
 
-Baseline result — **100% win rate**, mean bank 25,418 ± 921 over 12 episodes
+Baseline result, **100% win rate**, mean bank 25,418 ± 921 over 12 episodes
 (2 opponents × 3 seeds × 2 seats). ~1.3 s/episode.
 
 Note this only clears the built-in `starter` and `pass` agents, which are a very

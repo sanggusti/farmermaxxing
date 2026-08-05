@@ -1,7 +1,7 @@
 # farmermaxxing
 
 Agent for the Kaggle [Kaggriculture](https://www.kaggle.com/competitions/kaggriculture)
-simulation competition — a two-player, 720-turn farming/market game.
+simulation competition, a two-player, 720-turn farming/market game.
 
 Approach: a parameterised heuristic policy, tuned by cross-entropy search run
 against the real engine on Modal, with every experiment tracked in W&B.
