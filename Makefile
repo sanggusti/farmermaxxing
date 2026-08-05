@@ -30,8 +30,12 @@ replay:  ## Episode + replay JSON for the visualiser
 	$(PY) -m sim.run --opponent starter --replay replays/latest.json
 
 # ------------------------------------------------------------------ evaluation
-arena:  ## Holdout matrix vs frozen opponents, both seats (add WANDB=1 to log)
-	$(PY) -m sim.arena --seeds 8 --opponents starter,pass $(if $(WANDB),--wandb,)
+arena:  ## Holdout matrix vs the full opponent pool (add WANDB=1 to log)
+	$(PY) -m sim.arena --seeds 8 --opponents all $(if $(WANDB),--wandb,)
+
+freeze:  ## Snapshot agent/params.json into the opponent pool. NAME=v1-cem
+	@if [ -z "$(NAME)" ]; then echo 'set NAME=<snapshot-name>'; exit 1; fi
+	$(PY) -m sim.opponents --name $(NAME) --notes "$(NOTES)"
 
 test:  ## Unit tests: engine parity + submission contract
 	$(PY) -m pytest -q

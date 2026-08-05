@@ -111,8 +111,12 @@ class Params:
 
     @classmethod
     def from_json(cls, path):
+        # Via from_dict, so unknown keys are ignored rather than raising.
+        # Frozen opponent snapshots carry a `_notes` field, and an older
+        # params.json will lack fields added since it was written; both must
+        # still load.
         with open(path) as f:
-            return cls(**json.load(f))
+            return cls.from_dict(json.load(f))
 
     @classmethod
     def from_dict(cls, d):

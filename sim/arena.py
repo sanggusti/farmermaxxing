@@ -20,14 +20,24 @@ import statistics
 import sys
 
 from sim.harness import play, make_agent
+from sim.opponents import resolve_pool
 from params import Params
 from obs import wandb_setup
 
 
-def evaluate(params, opponents, seeds, steps=720, on_episode=None):
-    """Play params against each opponent across seeds, from both seats."""
+def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None):
+    """Play params against each opponent across seeds, from both seats.
+
+    `opponents` may hold built-in names or Params instances. `labels` gives the
+    display name for each; without it, Params opponents are all labelled the
+    same and per-opponent breakdowns become useless.
+    """
+    if labels is None:
+        labels = [o if isinstance(o, str) else f"params-{i}"
+                  for i, o in enumerate(opponents)]
+
     rows = []
-    for opp in opponents:
+    for opp, label in zip(opponents, labels):
         for seed in seeds:
             for seat in (0, 1):
                 me = make_agent(params)
@@ -37,7 +47,7 @@ def evaluate(params, opponents, seeds, steps=720, on_episode=None):
                 my_bank = r["banks"][seat]
                 their_bank = r["banks"][1 - seat]
                 row = {
-                    "opponent": opp if isinstance(opp, str) else "params",
+                    "opponent": label,
                     "seed": seed,
                     "seat": seat,
                     "bank": my_bank,
@@ -49,6 +59,25 @@ def evaluate(params, opponents, seeds, steps=720, on_episode=None):
                 if on_episode:
                     on_episode(row)
     return rows
+
+
+def per_opponent(rows):
+    """Win rate and mean bank broken down by opponent.
+
+    An aggregate can hide a regression: beating the built-ins by more while
+    losing to the reigning champion nets out to roughly no change.
+    """
+    out = {}
+    for row in rows:
+        out.setdefault(row["opponent"], []).append(row)
+    return {
+        name: {
+            "n": len(rs),
+            "mean_bank": statistics.mean([r["bank"] for r in rs]),
+            "win_rate": statistics.mean([r["win"] for r in rs]),
+        }
+        for name, rs in out.items()
+    }
 
 
 def summarise(rows):
@@ -69,7 +98,8 @@ def summarise(rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=8)
-    ap.add_argument("--opponents", default="starter")
+    ap.add_argument("--opponents", default="starter",
+                    help="built-ins, frozen snapshot names, or 'all'/'frozen'")
     ap.add_argument("--steps", type=int, default=720)
     ap.add_argument("--params", default=None)
     ap.add_argument("--wandb", action="store_true", help="log this sweep to W&B")
@@ -77,7 +107,7 @@ def main():
     args = ap.parse_args()
 
     params = Params.from_json(args.params) if args.params else Params()
-    opponents = [o.strip() for o in args.opponents.split(",") if o.strip()]
+    opponents, labels = resolve_pool(args.opponents)
     seeds = list(range(args.seeds))
 
     if not args.wandb:
@@ -96,11 +126,16 @@ def main():
                                  ("opponent", "seed", "seat", "bank",
                                   "opp_bank", "win", "status")])
 
-        rows = evaluate(params, opponents, seeds, args.steps, on_episode=record)
+        rows = evaluate(params, opponents, seeds, args.steps,
+                        on_episode=record, labels=labels)
         stats = summarise(rows)
 
+        breakdown = per_opponent(rows)
         for k, v in stats.items():
             run.summary[k] = v
+        for name, b in breakdown.items():
+            run.summary[f"vs_{name}/mean_bank"] = b["mean_bank"]
+            run.summary[f"vs_{name}/win_rate"] = b["win_rate"]
         if table is not None:
             run.log({"episodes": table})
 
@@ -110,6 +145,9 @@ def main():
     print(f"median bank : {stats['median_bank']:>12,.0f}")
     print(f"worst bank  : {stats['min_bank']:>12,.0f}")
     print(f"win rate    : {stats['win_rate']:>12.1%}")
+    print("per opponent:")
+    for name, b in sorted(breakdown.items()):
+        print(f"  {name:<22} bank {b['mean_bank']:>11,.0f}   win {b['win_rate']:>6.1%}   n={b['n']}")
     if stats["errors"]:
         print(f"ERRORS      : {stats['errors']} episodes did not finish cleanly")
         return 1
