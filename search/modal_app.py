@@ -30,23 +30,61 @@ image = (
 app = modal.App("farmermaxxing", image=image)
 
 
-@app.function(cpu=1.0, memory=2048, timeout=1800, max_containers=200, retries=2)
-def score_one(vec, seeds, opponent, steps):
-    """Score a single candidate. Returns the same dict `arena.summarise` gives.
+# A CEM generation is two synchronisation barriers (score the population, then
+# re-score the elites on holdout), so a 20-generation run pays fixed per-barrier
+# overhead 40 times. Measured at population 64: ~150s per generation against
+# ~13s of actual episode work per container. Almost all of it was containers
+# cold-starting for every barrier.
+#
+# Three changes, in order of how much they bought:
+#   min_containers   keeps a warm pool alive so a barrier does not cold-start
+#   scaledown_window holds those containers through the gap while the driver
+#                    refits the Gaussian between generations
+#   @modal.enter()   pays the kaggle_environments import once per container
+#                    instead of once per input
+@app.cls(
+    cpu=1.0,
+    memory=2048,
+    timeout=3600,
+    max_containers=1000,
+    min_containers=96,
+    scaledown_window=600,
+    retries=2,
+)
+class Scorer:
+    @modal.enter()
+    def setup(self):
+        """Runs once per container, not once per candidate."""
+        import sys
 
-    Workers deliberately do no W&B logging -- they return stats and the driver
-    logs one row per generation. Hundreds of containers each opening their own
-    run would bury the signal, and a preempted container would leave a dangling
-    "running" run behind.
-    """
-    import sys
+        sys.path[:0] = ["/root", "/root/agent"]
+        import kaggle_environments  # noqa: F401  warm the import
 
-    sys.path[:0] = ["/root", "/root/agent"]
-    from params import unflatten
-    from sim.arena import evaluate, summarise
+        from sim.arena import evaluate, summarise
 
-    rows = evaluate(unflatten(vec), [opponent], seeds, steps)
-    return summarise(rows)
+        self._evaluate = evaluate
+        self._summarise = summarise
+
+    @modal.method()
+    def episode(self, vec, seed, seat, opponent, steps):
+        """One episode, one seat. The unit of fan-out.
+
+        Scoring a whole candidate in one container serialises its seeds: 12
+        episodes at ~1.4s is ~17s, and with two barriers per generation that
+        alone floors a generation at ~34s no matter how many containers exist.
+        At episode granularity a generation costs about one episode of wall
+        clock plus dispatch, because 256 candidates x 12 episodes fan out
+        across the pool instead of queuing behind each other.
+        """
+        from params import unflatten
+        from sim.harness import play, make_agent
+
+        me = make_agent(unflatten(vec))
+        a, b = (me, opponent) if seat == 0 else (opponent, me)
+        r = play(a, b, seed=seed, steps=steps)
+        return {"bank": r["banks"][seat],
+                "opp_bank": r["banks"][1 - seat],
+                "status": r["statuses"][seat]}
 
 
 @contextlib.contextmanager
@@ -55,17 +93,47 @@ def session():
 
     Opening `app.run()` per call re-uploads the mounts and re-creates the app
     every time, which measured at roughly 15 minutes per CEM generation against
-    about 1 minute of real episode compute. The search opens this once and every
-    scoring call reuses it.
+    about 1 minute of real episode compute.
     """
     with app.run():
         yield
 
 
 def score_population(vectors, seeds, opponent, steps):
-    """Score candidates on Modal. Requires an open `session()`."""
-    args = [(v, seeds, opponent, steps) for v in vectors]
-    return list(score_one.starmap(args))
+    """Score candidates on Modal. Requires an open `session()`.
+
+    Fans out at episode granularity and reassembles per candidate locally, so
+    the summary statistics are identical to `sim.arena.summarise`.
+    """
+    import statistics
+
+    args, owner = [], []
+    for i, v in enumerate(vectors):
+        for seed in seeds:
+            for seat in (0, 1):
+                args.append((v, seed, seat, opponent, steps))
+                owner.append(i)
+
+    results = [[] for _ in vectors]
+    for idx, r in zip(owner, Scorer().episode.starmap(args)):
+        results[idx].append(r)
+
+    out = []
+    for rows in results:
+        banks = [r["bank"] for r in rows]
+        wins = [1 if r["bank"] > r["opp_bank"]
+                else (0 if r["bank"] < r["opp_bank"] else 0.5) for r in rows]
+        out.append({
+            "n": len(rows),
+            "mean_bank": statistics.mean(banks),
+            "median_bank": statistics.median(banks),
+            "min_bank": min(banks),
+            "stderr": (statistics.stdev(banks) / len(banks) ** 0.5
+                       if len(banks) > 1 else 0.0),
+            "win_rate": statistics.mean(wins),
+            "errors": sum(1 for r in rows if r["status"] != "DONE"),
+        })
+    return out
 
 
 @app.local_entrypoint()
@@ -76,5 +144,4 @@ def main():
     sys.path[:0] = [REPO, os.path.join(REPO, "agent")]
     from params import Params, flatten
 
-    result = score_one.remote(flatten(Params()), [0, 1], "starter", 720)
-    print(result)
+    print(Scorer().episode.remote(flatten(Params()), 0, 0, "starter", 720))
