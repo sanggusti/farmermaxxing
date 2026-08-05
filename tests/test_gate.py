@@ -1,0 +1,78 @@
+"""The promotion gate must reject the specific ways a candidate fakes progress.
+
+The decision rule is tested directly against synthetic statistics. Driving it
+through real episodes would be slow and would depend on whatever the agent
+happens to do at a given episode length, which tests the agent rather than the
+rule.
+"""
+
+from params import Params
+from sim.gate import decide, run_gate
+
+
+def stats(mean, minimum, stderr=100.0, errors=0):
+    return {"mean_bank": mean, "min_bank": minimum, "stderr": stderr,
+            "errors": errors, "win_rate": 1.0, "n": 8, "median_bank": mean}
+
+
+def winning(*names):
+    return {n: {"win_rate": 1.0, "mean_bank": 1.0, "n": 4} for n in names}
+
+
+def results(checks):
+    return {label: ok for label, ok, _ in checks}
+
+
+def find(checks, needle):
+    return next(ok for label, ok, _ in checks if needle in label)
+
+
+def test_clear_improvement_passes_every_check():
+    checks, delta, _ = decide(stats(60_000, 55_000), stats(50_000, 48_000),
+                              winning("starter"))
+    assert delta == 10_000
+    assert all(ok for _, ok, _ in checks)
+
+
+def test_gain_inside_noise_is_rejected():
+    """A 500-coin gain against a ~1,000-coin standard error is not evidence."""
+    checks, _, se = decide(stats(50_500, 48_000, stderr=1_000),
+                           stats(50_000, 48_000, stderr=1_000),
+                           winning("starter"))
+    assert se > 500
+    assert find(checks, "sigma") is False
+
+
+def test_mean_up_but_floor_collapsed_is_rejected():
+    """The real case from the livestock ablation.
+
+    Mean 51,131 over champion's 50,588 reads as an improvement, while the worst
+    seed fell from 48,542 to 40,173. The ladder scores win/loss, so a collapsing
+    floor costs matches the mean conceals.
+    """
+    checks, _, _ = decide(stats(51_131, 40_173, stderr=10.0),
+                          stats(50_588, 48_542, stderr=10.0),
+                          winning("starter"))
+    assert find(checks, "sigma") is True     # the mean really did improve
+    assert find(checks, "floor") is False    # but the floor disqualifies it
+
+
+def test_losing_to_any_single_opponent_is_rejected():
+    by_opp = {"starter": {"win_rate": 1.0, "mean_bank": 1.0, "n": 4},
+              "champion-v1": {"win_rate": 0.25, "mean_bank": 1.0, "n": 4}}
+    checks, _, _ = decide(stats(80_000, 70_000), stats(50_000, 48_000), by_opp)
+    assert find(checks, "opponent") is False
+
+
+def test_errored_episodes_are_rejected():
+    checks, _, _ = decide(stats(80_000, 70_000, errors=1),
+                          stats(50_000, 48_000), winning("starter"))
+    assert find(checks, "errored") is False
+
+
+def test_identical_params_do_not_pass_end_to_end():
+    """Integration check: same params in both slots is never an improvement."""
+    p = Params()
+    checks, *_ = run_gate(p, p, "starter", n_seeds=2, steps=120)
+    assert find(checks, "sigma") is False
+    assert len(checks) == 4

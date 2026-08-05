@@ -37,6 +37,10 @@ freeze:  ## Snapshot agent/params.json into the opponent pool. NAME=v1-cem
 	@if [ -z "$(NAME)" ]; then echo 'set NAME=<snapshot-name>'; exit 1; fi
 	$(PY) -m sim.opponents --name $(NAME) --notes "$(NOTES)"
 
+gate:  ## Promotion gate: is the candidate genuinely better? CHAMPION=path
+	$(PY) -m sim.gate --candidate agent/params.json \
+	  $(if $(CHAMPION),--champion $(CHAMPION),) $(if $(WANDB),--wandb,)
+
 test:  ## Unit tests: engine parity + submission contract
 	$(PY) -m pytest -q
 
