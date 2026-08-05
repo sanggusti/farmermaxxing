@@ -29,6 +29,26 @@ image = (
 
 app = modal.App("farmermaxxing", image=image)
 
+WORKERS = int(os.environ.get("FM_WORKERS", "8"))
+
+
+def _run_episode(args):
+    """One episode, one seat. Module-level so multiprocessing can pickle it."""
+    import sys
+
+    sys.path[:0] = ["/root", "/root/agent"]
+    from params import unflatten
+    from sim.fastplay import fast_play
+    from sim.harness import make_agent
+
+    vec, seed, seat, opponent, steps = args
+    me = make_agent(unflatten(vec))
+    a, b = (me, opponent) if seat == 0 else (opponent, me)
+    r = fast_play(a, b, seed=seed, steps=steps)
+    return {"bank": r["banks"][seat],
+            "opp_bank": r["banks"][1 - seat],
+            "status": r["statuses"][seat]}
+
 
 # A CEM generation is two synchronisation barriers (score the population, then
 # re-score the elites on holdout), so a 20-generation run pays fixed per-barrier
@@ -42,9 +62,20 @@ app = modal.App("farmermaxxing", image=image)
 #                    refits the Gaussian between generations
 #   @modal.enter()   pays the kaggle_environments import once per container
 #                    instead of once per input
+# cpu=8 with an 8-process pool inside, not cpu=1 with more containers, because
+# the account cap is on containers and cannot be raised. Benchmarked
+# (search/bench_cpu.py), episodes/sec per container:
+#     cpu=1  0.87   1.00x
+#     cpu=4  2.96   3.39x
+#     cpu=8  5.09   5.82x   <- plateau, ~8 usable cores on the host
+#     cpu=16 5.11   5.84x   double the cost for nothing
+# Processes rather than threads: the workload is pure Python and GIL-bound.
+# This is a wall-clock win, not a cost win. cpu=8 bills 8x per container-second
+# for 5.8x the work, so cost per episode rises ~38%. Wall clock is the
+# constraint we cannot buy our way out of, so that trade is worth taking.
 @app.cls(
-    cpu=1.0,
-    memory=2048,
+    cpu=8.0,
+    memory=16384,
     timeout=3600,
     max_containers=int(os.environ.get('FM_MAX_CONTAINERS', '250')),
     min_containers=int(os.environ.get('FM_MIN_CONTAINERS', '8')),
@@ -66,26 +97,22 @@ class Scorer:
         self._summarise = summarise
 
     @modal.method()
-    def episode(self, vec, seed, seat, opponent, steps):
-        """One episode, one seat. The unit of fan-out.
+    def episodes(self, batch):
+        """Run a batch of episodes across this container's worker pool.
 
-        Scoring a whole candidate in one container serialises its seeds: 12
-        episodes at ~1.4s is ~17s, and with two barriers per generation that
-        alone floors a generation at ~34s no matter how many containers exist.
-        At episode granularity a generation costs about one episode of wall
-        clock plus dispatch, because 256 candidates x 12 episodes fan out
-        across the pool instead of queuing behind each other.
+        The batch is a list of (vec, seed, seat, opponent, steps). Batching
+        rather than one episode per input keeps dispatch overhead down and gives
+        the pool enough work to saturate every core.
         """
-        from params import unflatten
-        from sim.fastplay import fast_play
-        from sim.harness import make_agent
+        import multiprocessing as mp
 
-        me = make_agent(unflatten(vec))
-        a, b = (me, opponent) if seat == 0 else (opponent, me)
-        r = fast_play(a, b, seed=seed, steps=steps)
-        return {"bank": r["banks"][seat],
-                "opp_bank": r["banks"][1 - seat],
-                "status": r["statuses"][seat]}
+        if len(batch) == 1:
+            return [_run_episode(batch[0])]
+
+        # fork so workers inherit the imports @modal.enter() already warmed
+        ctx = mp.get_context("fork")
+        with ctx.Pool(WORKERS) as pool:
+            return pool.map(_run_episode, batch)
 
 
 @contextlib.contextmanager
@@ -100,11 +127,12 @@ def session():
         yield
 
 
-def score_population(vectors, seeds, opponent, steps):
+def score_population(vectors, seeds, opponent, steps, containers=100):
     """Score candidates on Modal. Requires an open `session()`.
 
-    Fans out at episode granularity and reassembles per candidate locally, so
-    the summary statistics are identical to `sim.arena.summarise`.
+    Fans out at episode granularity, batched so each container gets enough work
+    to fill its worker pool, and reassembles per candidate locally so the
+    summary statistics are identical to `sim.arena.summarise`.
     """
     import statistics
 
@@ -115,8 +143,17 @@ def score_population(vectors, seeds, opponent, steps):
                 args.append((v, seed, seat, opponent, steps))
                 owner.append(i)
 
+    # One batch per container, rounded up, so every container gets a share and
+    # none sits idle waiting on a straggler batch.
+    size = max(WORKERS, (len(args) + containers - 1) // containers)
+    batches = [args[i:i + size] for i in range(0, len(args), size)]
+
+    flat = []
+    for chunk in Scorer().episodes.map(batches):
+        flat.extend(chunk)
+
     results = [[] for _ in vectors]
-    for idx, r in zip(owner, Scorer().episode.starmap(args)):
+    for idx, r in zip(owner, flat):
         results[idx].append(r)
 
     out = []
@@ -145,4 +182,5 @@ def main():
     sys.path[:0] = [REPO, os.path.join(REPO, "agent")]
     from params import Params, flatten
 
-    print(Scorer().episode.remote(flatten(Params()), 0, 0, "starter", 720))
+    print(Scorer().episodes.remote(
+        [(flatten(Params()), 0, 0, "starter", 720)]))
