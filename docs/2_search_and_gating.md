@@ -3,7 +3,7 @@
 **Date:** 2026-08-05
 **Milestone covered:** 5 of the plan (cross entropy search), plus the evaluation
 machinery that makes its output trustworthy
-**Status:** search complete, champion frozen as `v2-cem`, gate passed, nothing submitted
+**Status:** search complete, champion frozen as `v2-cem`, gate passed, submitted 2026-08-05
 
 ---
 
@@ -283,7 +283,21 @@ candidate was measured the same way.
 
 ---
 
+## Submitted
+
+Submission 55255699, 2026-08-05. Validation episode COMPLETED, so the flat
+layout, the `_agent_dir()` fallback and the `params.json` load all work in the
+real sandbox. That was the one failure mode local testing was built to rule out,
+because it fails as an error rather than a low score.
+
+Initial rating is 600, which is the default every submission starts at rather
+than a measurement. Ranked episodes accumulate from here and the rating is
+reported to converge slowly, so the meaningful number is days away, not minutes.
+Top of the leaderboard is currently 3105.6.
+
 ## Next
 
-Submit, once approved, and use the ladder to calibrate how far the local numbers
-actually carry.
+Use the ladder rating to calibrate how far the local numbers carry, then work
+the backlog in issues #25 to #31. The first question is #25: local evaluation
+overstates bank by about 20% because the opponents used during tuning were too
+weak to move market prices.
