@@ -17,6 +17,7 @@ than a win/loss bit, which means many fewer episodes per candidate.
 """
 
 import argparse
+import contextlib
 import os
 import random
 import statistics
@@ -73,6 +74,11 @@ def score_modal(vectors, seeds, opponent, steps):
     return score_population(vectors, seeds, opponent, steps)
 
 
+def modal_session():
+    from search.modal_app import session
+    return session()
+
+
 HOLDOUT_OFFSET = 10_000   # keeps holdout seeds far from any train seed
 
 
@@ -100,6 +106,10 @@ def main():
     holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
     mean, std = initial_distribution(Params())
     score = score_modal if args.modal else score_local
+
+    # Modal needs its app held open across the whole search; locally this is a
+    # no-op so the loop below is identical either way.
+    backend_session = modal_session() if args.modal else contextlib.nullcontext()
     n_elite = max(2, int(args.population * args.elite_frac))
 
     group = args.group or f"cem-g{args.generations}-p{args.population}"
@@ -108,7 +118,7 @@ def main():
     # us on episodes we have never seen.
     best_holdout, best_vec, best_train = float("-inf"), None, None
 
-    with wandb_setup.start("cem", group=group, tags=["cem"], config={
+    with backend_session, wandb_setup.start("cem", group=group, tags=["cem"], config={
         "generations": args.generations, "population": args.population,
         "elite_frac": args.elite_frac, "train_seeds": args.seeds,
         "holdout_seeds": args.holdout_seeds,

@@ -11,6 +11,7 @@ Cost check: CPU is $0.0472/core-hr, so ~1.3s per episode makes 10,000 episodes
 roughly $0.20. Compute is not the constraint here; wall-clock is.
 """
 
+import contextlib
 import os
 
 import modal
@@ -48,11 +49,23 @@ def score_one(vec, seeds, opponent, steps):
     return summarise(rows)
 
 
-def score_population(vectors, seeds, opponent, steps):
-    """Called from search/cem.py on the laptop; runs the episodes on Modal."""
-    args = [(v, seeds, opponent, steps) for v in vectors]
+@contextlib.contextmanager
+def session():
+    """Hold the Modal app open for a whole search.
+
+    Opening `app.run()` per call re-uploads the mounts and re-creates the app
+    every time, which measured at roughly 15 minutes per CEM generation against
+    about 1 minute of real episode compute. The search opens this once and every
+    scoring call reuses it.
+    """
     with app.run():
-        return list(score_one.starmap(args, wrap_returned_exceptions=False))
+        yield
+
+
+def score_population(vectors, seeds, opponent, steps):
+    """Score candidates on Modal. Requires an open `session()`."""
+    args = [(v, seeds, opponent, steps) for v in vectors]
+    return list(score_one.starmap(args))
 
 
 @app.local_entrypoint()
