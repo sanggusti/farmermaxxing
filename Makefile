@@ -37,6 +37,11 @@ freeze:  ## Snapshot agent/params.json into the opponent pool. NAME=v1-cem
 	@if [ -z "$(NAME)" ]; then echo 'set NAME=<snapshot-name>'; exit 1; fi
 	$(PY) -m sim.opponents --name $(NAME) --notes "$(NOTES)"
 
+promote:  ## Copy a search result into agent/params.json. FROM=runs/.../best_params.json
+	@if [ -z "$(FROM)" ]; then echo 'set FROM=<path to best_params.json>'; exit 1; fi
+	@cp $(FROM) agent/params.json
+	@echo "promoted $(FROM) -> agent/params.json (run 'make gate' next)"
+
 gate:  ## Promotion gate: is the candidate genuinely better? CHAMPION=path
 	$(PY) -m sim.gate --candidate agent/params.json \
 	  $(if $(CHAMPION),--champion $(CHAMPION),) $(if $(WANDB),--wandb,)

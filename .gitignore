@@ -6,3 +6,4 @@ replays/
 submission.tar.gz
 wandb/
 .env
+runs/
