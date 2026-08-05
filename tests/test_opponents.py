@@ -55,3 +55,31 @@ def test_notes_do_not_break_loading(tmp_path, monkeypatch):
     monkeypatch.setattr(opponents, "POOL_DIR", str(tmp_path))
     opponents.freeze(Params(), "snap-c", notes="why we promoted this")
     opponents.load("snap-c")
+
+
+def test_cli_runs_in_a_clean_interpreter(tmp_path):
+    """`make freeze` must work outside a pytest session.
+
+    The other tests here import sim.opponents after conftest.py has already put
+    agent/ on sys.path, so they cannot catch a missing path setup in the module
+    itself. This runs the CLI the way a user does, in a fresh interpreter.
+    """
+    import subprocess
+    import sys as _sys
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    params = tmp_path / "src.json"
+    Params().to_json(str(params))
+
+    proc = subprocess.run(
+        [_sys.executable, "-m", "sim.opponents", "--name", "cli-smoke",
+         "--params", str(params)],
+        cwd=repo, capture_output=True, text=True,
+        env={**os.environ, "FARMERMAXXING_POOL_DIR": str(tmp_path)},
+    )
+    # Clean up whatever the CLI wrote into the real pool.
+    written = os.path.join(repo, "sim", "opponents", "cli-smoke.json")
+    if os.path.exists(written):
+        os.remove(written)
+
+    assert proc.returncode == 0, f"CLI failed:\n{proc.stderr}"

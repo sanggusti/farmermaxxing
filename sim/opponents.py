@@ -14,6 +14,14 @@ is a regression, and a pool of one cannot show that.
 
 import json
 import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The agent modules are flat in agent/ because that is how Kaggle unpacks a
+# submission. Set the path here rather than relying on sim.harness having been
+# imported first, so `python -m sim.opponents` works on its own.
+if os.path.join(REPO, "agent") not in sys.path:
+    sys.path.insert(0, os.path.join(REPO, "agent"))
 
 BUILTIN = ("starter", "pass", "random")
 
@@ -91,8 +99,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True, help="snapshot name, e.g. v1-cem")
-    ap.add_argument("--params", default=os.path.join(
-        os.path.dirname(POOL_DIR), "..", "agent", "params.json"))
+    ap.add_argument("--params", default=os.path.join(REPO, "agent", "params.json"))
     ap.add_argument("--notes", default=None)
     args = ap.parse_args()
 

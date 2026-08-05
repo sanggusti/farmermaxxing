@@ -214,8 +214,11 @@ export WANDB_API_KEY=...   # .mcp.json references ${WANDB_API_KEY}, never the li
 |---|---|
 | `make play` | one episode vs `starter`, prints both banks |
 | `make trace` | **per-day X-ray**, cash, tiles, shed, prices. Start here when debugging |
-| `make arena` | holdout matrix vs frozen opponents, both seats |
+| `make arena` | holdout matrix vs the full opponent pool, both seats |
 | `make arena WANDB=1` | same, logged to W&B |
+| `make gate` | promotion gate: four checks, exits non-zero on failure |
+| `make promote FROM=runs/.../best_params.json` | move a search result into `agent/params.json` |
+| `make freeze NAME=v1-cem` | snapshot the current params into the opponent pool |
 | `make test` | engine parity + submission contract |
 | `make check` | everything, including the timing test, gate before submitting |
 | `make search` | small local CEM |
@@ -223,6 +226,28 @@ export WANDB_API_KEY=...   # .mcp.json references ${WANDB_API_KEY}, never the li
 | `make bundle` | build `submission.tar.gz` (runs `make check` first) |
 | `make submit CONFIRM=1 M="..."` | submit, refuses without `CONFIRM=1` |
 | `make check-engine` | diff our pinned engine against upstream master |
+
+### The promotion workflow
+
+A search never writes into the tracked tree. Results land in
+`runs/<group>/best_params.json`, which is gitignored, and moving one into the
+agent is deliberate:
+
+```
+make promote FROM=runs/cem-modal-full-v2/best_params.json
+make gate                     # four checks against the frozen pool
+make freeze NAME=v2-cem       # only if the gate passed
+```
+
+The gate exits non-zero unless all four pass: no errored episodes, mean beats
+the champion by more than the combined standard error, the floor does not
+regress beyond tolerance, and there is no losing record against any single
+opponent in the pool.
+
+The floor check is not decoration. A livestock variant measured mean 51,131
+against a champion's 50,588 while its worst seed fell from 48,542 to 40,173.
+Rating moves on win and loss, so that trade buys average points at the cost of
+matches.
 
 ### Two metrics, two jobs
 
