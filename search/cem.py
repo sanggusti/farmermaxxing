@@ -73,12 +73,17 @@ def score_modal(vectors, seeds, opponent, steps):
     return score_population(vectors, seeds, opponent, steps)
 
 
+HOLDOUT_OFFSET = 10_000   # keeps holdout seeds far from any train seed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--generations", type=int, default=8)
     ap.add_argument("--population", type=int, default=24)
     ap.add_argument("--elite-frac", type=float, default=0.25)
-    ap.add_argument("--seeds", type=int, default=4)
+    ap.add_argument("--seeds", type=int, default=4, help="train seeds")
+    ap.add_argument("--holdout-seeds", type=int, default=6,
+                    help="disjoint seeds used only to select and report")
     ap.add_argument("--steps", type=int, default=720)
     ap.add_argument("--opponent", default="starter")
     ap.add_argument("--modal", action="store_true", help="fan out on Modal")
@@ -91,17 +96,22 @@ def main():
         os.environ["WANDB_MODE"] = "disabled"
 
     rng = random.Random(args.rng_seed)
-    seeds = list(range(args.seeds))
+    train_seeds = list(range(args.seeds))
+    holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
     mean, std = initial_distribution(Params())
     score = score_modal if args.modal else score_local
     n_elite = max(2, int(args.population * args.elite_frac))
 
     group = args.group or f"cem-g{args.generations}-p{args.population}"
-    best_overall, best_vec = float("-inf"), None
+    # Selection is on HOLDOUT, never on train. With 41 free parameters and a
+    # handful of seeds, the train score is a fitting artefact; the ladder scores
+    # us on episodes we have never seen.
+    best_holdout, best_vec, best_train = float("-inf"), None, None
 
     with wandb_setup.start("cem", group=group, tags=["cem"], config={
         "generations": args.generations, "population": args.population,
-        "elite_frac": args.elite_frac, "seeds": args.seeds,
+        "elite_frac": args.elite_frac, "train_seeds": args.seeds,
+        "holdout_seeds": args.holdout_seeds,
         "opponent": args.opponent, "backend": "modal" if args.modal else "local",
     }) as run:
 
@@ -112,40 +122,54 @@ def main():
             if gen == 0:
                 population[0] = flatten(Params())
 
-            stats = score(population, seeds, args.opponent, args.steps)
+            stats = score(population, train_seeds, args.opponent, args.steps)
             ranked = sorted(zip(stats, population), key=lambda sp: -sp[0]["mean_bank"])
             elites = [vec for _, vec in ranked[:n_elite]]
 
-            top = ranked[0][0]
-            if top["mean_bank"] > best_overall:
-                best_overall, best_vec = top["mean_bank"], ranked[0][1]
+            # Re-score the elites on unseen seeds and pick the generation's
+            # champion there. Only the elites, to keep the extra cost small.
+            hold_stats = score(elites, holdout_seeds, args.opponent, args.steps)
+            hold_ranked = sorted(zip(hold_stats, elites),
+                                 key=lambda sp: -sp[0]["mean_bank"])
+            champion_stats, champion_vec = hold_ranked[0]
+
+            if champion_stats["mean_bank"] > best_holdout:
+                best_holdout = champion_stats["mean_bank"]
+                best_vec = champion_vec
+                best_train = ranked[0][0]["mean_bank"]
                 unflatten(best_vec).to_json(BEST_PATH)
 
             new_mean, new_std = refit(elites)
             mean = {k: (1 - 0.3) * new_mean[k] + 0.3 * mean[k] for k in mean}
             std = new_std
 
+            train_best = ranked[0][0]["mean_bank"]
             row = {
                 "gen": gen,
-                "best_bank": top["mean_bank"],
-                "best_win_rate": top["win_rate"],
-                "elite_mean_bank": statistics.mean(
+                "train_best_bank": train_best,
+                "train_pop_mean_bank": statistics.mean([s["mean_bank"] for s in stats]),
+                "train_elite_mean_bank": statistics.mean(
                     [s["mean_bank"] for s, _ in ranked[:n_elite]]),
-                "pop_mean_bank": statistics.mean([s["mean_bank"] for s in stats]),
-                "best_overall": best_overall,
+                "holdout_best_bank": champion_stats["mean_bank"],
+                "holdout_win_rate": champion_stats["win_rate"],
+                "holdout_min_bank": champion_stats["min_bank"],
+                # A widening gap is the overfitting signal to watch.
+                "generalisation_gap": train_best - champion_stats["mean_bank"],
+                "best_holdout_overall": best_holdout,
             }
             run.log(row)
-            print(f"gen {gen:>2}  best {row['best_bank']:>12,.0f}  "
-                  f"elite {row['elite_mean_bank']:>12,.0f}  "
-                  f"pop {row['pop_mean_bank']:>12,.0f}  "
-                  f"win {row['best_win_rate']:.0%}")
+            print(f"gen {gen:>2}  train {train_best:>11,.0f}  "
+                  f"holdout {champion_stats['mean_bank']:>11,.0f}  "
+                  f"gap {row['generalisation_gap']:>10,.0f}  "
+                  f"win {champion_stats['win_rate']:.0%}")
 
-        run.summary["best_bank"] = best_overall
+        run.summary["best_holdout_bank"] = best_holdout
+        run.summary["best_train_bank"] = best_train
         if best_vec is not None:
             wandb_setup.log_params_artifact(
-                run, BEST_PATH, metadata={"mean_bank": best_overall})
+                run, BEST_PATH, metadata={"holdout_mean_bank": best_holdout})
 
-    print(f"\nbest mean bank {best_overall:,.0f} -> {BEST_PATH}")
+    print(f"\nbest holdout mean bank {best_holdout:,.0f} -> {BEST_PATH}")
 
 
 if __name__ == "__main__":
