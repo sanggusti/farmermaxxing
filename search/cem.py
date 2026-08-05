@@ -34,10 +34,15 @@ from obs import wandb_setup                                    # noqa: E402
 BEST_PATH = os.path.join(REPO, "agent", "params.json")
 
 
-def initial_distribution(base):
-    """Mean at the hand-set defaults; std at a quarter of each range."""
+def initial_distribution(base, spread=0.25):
+    """Centre the Gaussian on `base`, with std at `spread` of each range.
+
+    Cold start uses the wide default spread to explore. A warm start from an
+    already-tuned set wants a narrower spread, so the search refines what it was
+    given instead of wandering back out to where it began.
+    """
     mean = flatten(base)
-    std = {name: (hi - lo) * 0.25 for name, (lo, hi, _) in SEARCH_SPACE.items()}
+    std = {name: (hi - lo) * spread for name, (lo, hi, _) in SEARCH_SPACE.items()}
     return mean, std
 
 
@@ -96,6 +101,11 @@ def main():
     ap.add_argument("--rng-seed", type=int, default=0)
     ap.add_argument("--group", default=None)
     ap.add_argument("--no-wandb", action="store_true")
+    ap.add_argument("--init-params", default=None,
+                    help="warm-start from this params.json instead of defaults")
+    ap.add_argument("--init-spread", type=float, default=None,
+                    help="initial std as a fraction of each range "
+                         "(default 0.25 cold, 0.10 warm)")
     args = ap.parse_args()
 
     if args.no_wandb:
@@ -104,7 +114,13 @@ def main():
     rng = random.Random(args.rng_seed)
     train_seeds = list(range(args.seeds))
     holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
-    mean, std = initial_distribution(Params())
+    if args.init_params:
+        base = Params.from_json(args.init_params)
+        spread = args.init_spread if args.init_spread is not None else 0.10
+    else:
+        base = Params()
+        spread = args.init_spread if args.init_spread is not None else 0.25
+    mean, std = initial_distribution(base, spread)
     score = score_modal if args.modal else score_local
 
     # Modal needs its app held open across the whole search; locally this is a
@@ -123,6 +139,7 @@ def main():
         "elite_frac": args.elite_frac, "train_seeds": args.seeds,
         "holdout_seeds": args.holdout_seeds,
         "opponent": args.opponent, "backend": "modal" if args.modal else "local",
+        "init_params": args.init_params or "defaults", "init_spread": spread,
     }) as run:
 
         for gen in range(args.generations):
@@ -130,7 +147,7 @@ def main():
             # never return something worse than what we started with.
             population = [sample(mean, std, rng) for _ in range(args.population)]
             if gen == 0:
-                population[0] = flatten(Params())
+                population[0] = flatten(base)
 
             stats = score(population, train_seeds, args.opponent, args.steps)
             ranked = sorted(zip(stats, population), key=lambda sp: -sp[0]["mean_bank"])
