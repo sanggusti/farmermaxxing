@@ -3,7 +3,7 @@
 **Date:** 2026-08-05
 **Milestone covered:** 5 of the plan (cross entropy search), plus the evaluation
 machinery that makes its output trustworthy
-**Status:** search complete, champion frozen, gate passed, nothing submitted
+**Status:** search complete, champion frozen as `v2-cem`, gate passed, nothing submitted
 
 ---
 
@@ -60,25 +60,44 @@ holdout seeds, both seats, on Modal.
 | 5 | 69,255 | 68,689 | +567 |
 | 6 | 69,769 | 69,822 | -52 |
 | 7 | 76,659 | 75,398 | +1,261 |
+| 8 | 73,769 | 72,523 | +1,246 |
+| 9 | 79,655 | 76,938 | +2,717 |
+| 10 | 77,374 | 80,467 | -3,093 |
+| 11 | 82,257 | 80,187 | +2,070 |
+| 12 | 82,336 | 79,489 | +2,848 |
+| 13 | 83,849 | 82,652 | +1,197 |
+| 14 | 83,787 | **83,586** | +201 |
+| 15 | 83,633 | 81,934 | +1,699 |
 
-Cost is roughly $2 of Modal CPU. Compute was never the constraint here; wall
-clock was, which is what made the app lifecycle bug below worth fixing rather
-than tolerating.
+Final: **83,586 holdout**, 3.4x the hand-tuned baseline of 24,895, in about 40
+minutes of wall clock and roughly $2 of Modal CPU.
 
-### The gen 4 scare
+Compute was never the constraint here; wall clock was, which is what made the
+app lifecycle bug below worth fixing rather than tolerating.
+
+### Two false alarms, and why watching beat reacting
 
 For four generations the gap sat negative, meaning holdout scored *above* train.
 At generation 4 it flipped to +4,821 while holdout barely moved, 64,305 to
-64,570. That is the shape of overfitting starting: train pulling away while
-unseen seeds stall.
+64,570. That is the shape of overfitting: train pulling away while unseen seeds
+stall. Generation 5 closed the gap to +567 and holdout jumped to 68,689, so it
+was noise.
 
-The right response to one data point is to keep watching, not to act, and that
-turned out to be correct. Generation 5 closed the gap to +567 and holdout jumped
-to 68,689. Generation 4 was noise.
+It happened again, and more convincingly, at generations 10 to 12. Train climbed
+77,374 to 82,257 to 82,336 while holdout went 80,467 to 80,187 to 79,489 and the
+gap widened to +2,848. Three consecutive generations of the textbook pattern.
+Stopping there was the obvious call.
 
-Recording it because the instinct to stop the run there was real, and the only
-reason it was resistable is that the metric existed and could be watched over
-several generations instead of reacted to once.
+Generations 13 and 14 then produced the two best holdout scores of the entire
+run, 82,652 and 83,586, with the gap narrowing to +201. The plateau was a
+plateau, not a ceiling.
+
+The lesson is not that the gap metric is useless. It is that a three-generation
+trend in a stochastic search is still a small sample, and the cost of being
+wrong was asymmetric: letting it finish cost about eight minutes, and stopping
+early would have cost the best result. Selection is on holdout throughout, so
+an overfit tail can never promote a worse agent, which is what made waiting
+cheap.
 
 ---
 
@@ -211,6 +230,39 @@ including the exact cow figures from the ablation. Faster, deterministic, and it
 actually tests the rule.
 
 ---
+
+## The gate verdict
+
+New champion against the previous one, holdout seeds, full pool, both seats:
+
+```
+                     mean        worst      win
+candidate          78,937       55,707  100.0%
+champion           47,239       35,408   87.5%
+delta             +31,698 (1 sigma = 1,384)
+
+per opponent (candidate):
+  pass                   bank      82,492   win 100.0%
+  random                 bank      82,647   win 100.0%
+  starter                bank      83,599   win 100.0%
+  v1-warmbase            bank      67,010   win 100.0%
+
+GATE PASSED (all four checks)
+```
+
+A 23 sigma margin, and the floor rose from 35,408 to 55,707 rather than being
+traded away for the mean.
+
+One number in there is more interesting than the verdict. The candidate banks
+about 83,000 against the built-in opponents and 67,010 against `v1-warmbase`, a
+20% drop. That is the market coupling appearing for the first time in a
+measurement. A capable opponent selling into the same market moves prices
+against us, and the weak built-ins never did enough business to show it.
+
+It also means every number produced before the pool existed was measured against
+opponents too weak to apply the pressure the ladder will. The absolute figures
+are optimistic; the comparisons between them are still sound, because every
+candidate was measured the same way.
 
 ## Open questions
 
