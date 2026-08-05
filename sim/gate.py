@@ -25,7 +25,11 @@ from sim.opponents import resolve_pool
 from params import Params
 from obs import wandb_setup
 
-HOLDOUT_OFFSET = 10_000     # must match search/cem.py
+# Must match search/cem.py. The gate defaults to the CLEAN range, not the
+# selection range: judging a candidate on the seeds it was selected on asks the
+# search to mark its own work.
+HOLDOUT_OFFSET = 10_000
+CLEAN_OFFSET = 20_000
 
 
 def decide(cand, champ, by_opp, margin_sigmas=1.0, floor_tolerance=0.10):
@@ -61,10 +65,10 @@ def decide(cand, champ, by_opp, margin_sigmas=1.0, floor_tolerance=0.10):
 
 
 def run_gate(candidate, champion, pool_spec, n_seeds, steps,
-             margin_sigmas=1.0, floor_tolerance=0.10):
+             margin_sigmas=1.0, floor_tolerance=0.10, offset=CLEAN_OFFSET):
     """Evaluate candidate and champion identically, then apply `decide`."""
     opponents, labels = resolve_pool(pool_spec)
-    seeds = [HOLDOUT_OFFSET + i for i in range(n_seeds)]
+    seeds = [offset + i for i in range(n_seeds)]
 
     cand_rows = evaluate(candidate, opponents, seeds, steps, labels=labels)
     champ_rows = evaluate(champion, opponents, seeds, steps, labels=labels)
@@ -86,6 +90,9 @@ def main():
     ap.add_argument("--steps", type=int, default=720)
     ap.add_argument("--margin-sigmas", type=float, default=1.0)
     ap.add_argument("--floor-tolerance", type=float, default=0.10)
+    ap.add_argument("--on-selection-seeds", action="store_true",
+                    help="judge on the seeds used to select (biased; for "
+                         "measuring that bias, not for promotion decisions)")
     ap.add_argument("--wandb", action="store_true")
     args = ap.parse_args()
 
@@ -96,14 +103,16 @@ def main():
         import os
         os.environ["WANDB_MODE"] = "disabled"
 
+    offset = HOLDOUT_OFFSET if args.on_selection_seeds else CLEAN_OFFSET
     checks, cand, champ, by_opp, delta, se = run_gate(
         candidate, champion, args.opponents, args.seeds, args.steps,
-        args.margin_sigmas, args.floor_tolerance)
+        args.margin_sigmas, args.floor_tolerance, offset=offset)
     passed = all(ok for _, ok, _ in checks)
 
     print(f"candidate : {args.candidate}")
     print(f"champion  : {args.champion or 'Params() defaults'}")
-    print(f"seeds     : holdout {HOLDOUT_OFFSET}..{HOLDOUT_OFFSET + args.seeds - 1}, both seats")
+    kind = "selection (BIASED)" if args.on_selection_seeds else "clean"
+    print(f"seeds     : {kind} {offset}..{offset + args.seeds - 1}, both seats")
     print()
     print(f"{'':<12} {'mean':>12} {'worst':>12} {'win':>8}")
     print(f"{'candidate':<12} {cand['mean_bank']:>12,.0f} {cand['min_bank']:>12,.0f} {cand['win_rate']:>7.1%}")
