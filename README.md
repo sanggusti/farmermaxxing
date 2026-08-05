@@ -17,3 +17,12 @@ make help       # everything else
 
 See **[DEVELOPMENTS.md](DEVELOPMENTS.md)** for the game breakdown, the engine
 gotchas that matter, the architecture walkthrough, and the experiment log.
+
+Technical reports, one per milestone:
+
+| Doc | Covers |
+|---|---|
+| [1. Setup and baseline](docs/1_setup_and_baseline.md) | why this is not an RL project, first working agent, six bugs |
+| [2. Search and gating](docs/2_search_and_gating.md) | CEM on Modal, holdout split, the promotion gate |
+| [3. Market starvation](docs/3_market_starvation.md) | a refuted hypothesis, and the constraint it uncovered |
+| [4. Scaling and conclusions](docs/4_scaling_and_conclusions.md) | 40x search throughput, multi-restart sweep, where things stand |
