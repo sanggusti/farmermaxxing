@@ -6,6 +6,10 @@ happens to do at a given episode length, which tests the agent rather than the
 rule.
 """
 
+import statistics
+
+import pytest
+
 from params import Params
 from sim.gate import decide, run_gate
 
@@ -103,3 +107,62 @@ def test_seed_ranges_do_not_overlap():
     assert not (train & selection)
     assert not (train & clean)
     assert not (selection & clean)
+
+
+def test_paired_stderr_blocks_out_the_between_cell_variance():
+    """The two agents play identical cells, so the cell effect must cancel.
+
+    Here every cell is worth wildly different amounts (an opponent main
+    effect), but the candidate beats the champion by exactly 100 everywhere.
+    The unpaired formula sees the 100k spread as noise and cannot resolve the
+    difference; the paired one sees a constant and resolves it exactly.
+    """
+    from sim.gate import paired_stderr
+
+    champ_banks = [10_000, 50_000, 90_000, 130_000] * 4
+    cand_banks = [b + 100 for b in champ_banks]
+
+    paired = paired_stderr(cand_banks, champ_banks)
+    unpaired = (statistics.stdev(cand_banks) / len(cand_banks) ** 0.5) ** 2
+    unpaired = (2 * unpaired) ** 0.5
+
+    assert paired == pytest.approx(0.0, abs=1e-9)
+    assert unpaired > 10_000
+    # A constant +100 improvement must be detectable; under the old formula the
+    # margin check would have needed a delta of tens of thousands.
+    assert 100 > 1.0 * paired
+
+
+def test_paired_stderr_falls_back_rather_than_lying_when_unaligned():
+    from sim.gate import paired_stderr
+
+    assert paired_stderr(None, None) is None
+    assert paired_stderr([1.0, 2.0], [1.0]) is None       # length mismatch
+    assert paired_stderr([1.0], [1.0]) is None            # too few to estimate
+
+
+def test_decide_uses_the_paired_error_when_banks_are_present():
+    """Same means, same marginal stderrs -- only the pairing differs."""
+    champ_banks = [10_000, 50_000, 90_000, 130_000] * 4
+    cand_banks = [b + 2_000 for b in champ_banks]
+
+    def stats(vals, **extra):
+        return {
+            "mean_bank": statistics.mean(vals),
+            "min_bank": min(vals),
+            "stderr": statistics.stdev(vals) / len(vals) ** 0.5,
+            "win_rate": 1.0, "errors": 0, "n": len(vals), **extra,
+        }
+
+    by_opp = {"x": {"win_rate": 1.0, "mean_bank": 1.0}}
+
+    unpaired_checks, _, unpaired_se = decide(
+        stats(cand_banks), stats(champ_banks), by_opp)
+    paired_checks, _, paired_se = decide(
+        stats(cand_banks, banks=cand_banks),
+        stats(champ_banks, banks=champ_banks), by_opp)
+
+    assert paired_se < unpaired_se
+    margin = "mean beats champion"
+    assert not [c for c in unpaired_checks if margin in c[0]][0][1]
+    assert [c for c in paired_checks if margin in c[0]][0][1]
