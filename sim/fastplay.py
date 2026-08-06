@@ -37,6 +37,15 @@ def _resolve(spec, engine):
     from sim.harness import make_agent
 
     if isinstance(spec, str):
+        # Recorded ladder tapes travel as a NAME, never as an object. A tape
+        # pickles to ~126 KB, and the Modal fan-out ships one opponent per
+        # episode -- at population 384 that is 1.16 GB of payload per
+        # generation. sim/tapes/ is inside the mounted sim/ directory, so a
+        # worker can load it locally from a short string instead.
+        if spec.startswith("tape:"):
+            from sim.tape import load as load_tape
+            return load_tape(spec[len("tape:"):])
+
         resolved = engine.agents.get(spec)
         if resolved is None:
             raise TypeError(
