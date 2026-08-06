@@ -86,3 +86,30 @@ def test_refit_still_tracks_the_elites_when_they_are_inside_the_box():
 
     mean, _ = refit(elites)
     assert mean[name] == statistics.mean([e[name] for e in elites])
+
+
+def test_worst_opponent_tolerance_does_not_collapse_at_zero():
+    """The guarded quantity is a margin, and margins pass through zero.
+
+    A warm start from the reigning champion ties itself at exactly 0 against
+    that champion. With a purely proportional tolerance the bar becomes
+    `0 - 0.05 * 0 == 0`, so any candidate that loses to it by a single coin is
+    rejected. A v7 run rejected 16 of its first 17 generations and returned its
+    own starting point.
+    """
+    from search.cem import WORST_TOLERANCE, WORST_TOLERANCE_FLOOR
+
+    def bar(best_worst):
+        return best_worst - max(WORST_TOLERANCE * abs(best_worst),
+                                WORST_TOLERANCE_FLOOR)
+
+    # At a tie, ordinary sampling noise must still get through.
+    assert bar(0.0) < -1000, "a near-zero incumbent must not freeze the search"
+
+    # A genuine collapse is still caught, at any incumbent level.
+    for best in (0.0, -20_000.0, 50_000.0):
+        assert bar(best) > best - 40_000
+
+    # The bar must move monotonically with the incumbent, including through
+    # zero -- the multiplicative form inverted for negative values.
+    assert bar(-20_000) < bar(0.0) < bar(50_000)

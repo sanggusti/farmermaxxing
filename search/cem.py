@@ -141,11 +141,25 @@ HOLDOUT_OFFSET = 10_000   # selection seeds: used to pick the champion
 CLEAN_OFFSET = 20_000     # reporting seeds: never used to optimise or select
 
 # How far the champion's worst matchup may slip while its average improves.
-# Not zero: at these sample sizes the worst-opponent mean carries real noise,
+# Not zero: at these sample sizes the worst-opponent margin carries real noise,
 # and rejecting every downward wobble would freeze the search. Not generous
 # either, because a collapsing matchup is a lost match on the ladder however
 # good the average looks.
 WORST_TOLERANCE = 0.05
+
+# ...and a floor, in coins, because the quantity being guarded is a MARGIN and
+# margins pass through zero. When the incumbent's worst margin is near zero -- a
+# warm start from the reigning champion ties itself at exactly 0 -- a purely
+# proportional tolerance collapses to nothing and the guard becomes infinitely
+# strict. Observed: a v7 run rejected 16 of its first 17 generations and
+# returned its own starting point.
+#
+# Sized from the noise it has to absorb. Per-cell bank standard deviation
+# measures around 9,500 coins, and a per-opponent margin is averaged over
+# holdout_seeds x 2 seats -- six episodes at the usual settings -- so one
+# standard error is roughly 3,900. A floor near that lets ordinary sampling
+# wobble through while still catching a genuine collapse.
+WORST_TOLERANCE_FLOOR = 4000.0
 
 # Three sets, because two is not enough. Train fits the parameters. Holdout
 # picks the champion, once per generation, which makes it a selection set:
@@ -283,8 +297,10 @@ def main():
             # multiplicative `best * (1 - tol)` is wrong for a signed quantity:
             # at best_worst = -1,000 it sets the bar at -950, so a genuine
             # improvement to -980 would be rejected for being "below" it.
+            tolerance = max(WORST_TOLERANCE * abs(best_worst or 0.0),
+                            WORST_TOLERANCE_FLOOR)
             regressed = (best_worst is not None
-                         and worst_margin < best_worst - WORST_TOLERANCE * abs(best_worst))
+                         and worst_margin < best_worst - tolerance)
             if champion_stats["mean_bank"] > best_holdout and not regressed:
                 best_holdout = champion_stats["mean_bank"]
                 best_worst = worst_margin if best_worst is None else max(best_worst, worst_margin)
