@@ -200,6 +200,11 @@ def summarise_cells(rows, labels):
         # Positional, aligned to `cells`, so the caller can standardise each
         # cell across the population before ranking.
         "banks": banks,
+        # Margin per cell. Both players trade into one market, so a shock that
+        # lifts my bank lifts theirs too; the difference cancels it. That makes
+        # margin the paired statistic WITHIN an episode, and its sign is the
+        # win the ladder actually scores.
+        "margins": [r["bank"] - r["opp_bank"] for r in rows],
         "by_opponent": {
             label: {
                 "n": len(rs),

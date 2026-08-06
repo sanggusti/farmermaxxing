@@ -48,7 +48,8 @@ def normalised_fitness(all_banks):
     """Per-cell z-scores averaged per candidate.
 
     `all_banks` is a list (per candidate) of lists (per cell, aligned). Returns
-    one scalar per candidate.
+    one scalar per candidate. Works on banks or margins -- the standardisation
+    is per cell either way.
 
     A cell where every candidate scores the same carries no information about
     ranking, so it contributes 0 rather than dividing by a ~0 spread.

@@ -136,3 +136,34 @@ def test_summarise_cells_breaks_down_by_opponent():
 def test_census_key_lists_stay_in_sync():
     """modal_app duplicates the list because it must import without `sim`."""
     assert tuple(_CENSUS_KEYS) == tuple(CENSUS_KEYS)
+
+
+def test_margins_are_aligned_with_banks_and_cells():
+    """Margin is the paired statistic within an episode.
+
+    Both players trade into one market, so a shock that lifts my bank lifts
+    theirs too and cancels in the difference. Its sign is also the win the
+    ladder scores, which mean bank is not: a candidate can bank more overall
+    while losing a specific matchup, which is exactly what v7 did against v5
+    (bank 86,573 vs 79,502, margin -2,887).
+    """
+    rows = [_row(100, 90), _row(300, 400), _row(50, 60), _row(70, 60)]
+    out = summarise_cells(rows, ["a", "a", "b", "b"])
+
+    assert out["margins"] == [10, -100, -10, 10]
+    assert len(out["margins"]) == len(out["banks"])
+    # Positional alignment with the cell list is what lets the caller
+    # standardise per cell; a reorder here would silently mis-pair candidates.
+    assert out["margins"] == [b - r["opp_bank"]
+                              for b, r in zip(out["banks"], rows)]
+
+
+def test_normalised_fitness_works_on_margins_too():
+    """Ranking on margin must be the same standardisation, not a special case."""
+    margins = [[10_000, -2_000], [5_000, 3_000]]
+    fit = normalised_fitness(margins)
+    assert len(fit) == 2
+    # Candidate 0 wins cell 0 by 1 sd, candidate 1 wins cell 1 by 1 sd: a tie,
+    # exactly as for banks.
+    assert fit[0] == pytest.approx(0.0, abs=1e-9)
+    assert fit[1] == pytest.approx(0.0, abs=1e-9)

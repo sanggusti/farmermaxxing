@@ -188,6 +188,13 @@ def main():
                          "Ranking standardises each cell across the population, "
                          "so a strong opponent is not drowned out by a weak one "
                          "producing bigger banks.")
+    ap.add_argument("--fitness", choices=("bank", "margin"), default="bank",
+                    help="What the population is RANKED on. `bank` is what "
+                         "every search so far used. `margin` is my bank minus "
+                         "the opponent's: both players trade into one market, "
+                         "so a shared shock cancels, and its sign is the win "
+                         "the ladder scores. Selection and reporting stay on "
+                         "mean bank either way, so runs remain comparable.")
     ap.add_argument("--reference", default=None,
                     help="pool spec used for SELECTION and reporting. Held "
                          "fixed so holdout scores stay comparable across "
@@ -251,6 +258,7 @@ def main():
         "elite_frac": args.elite_frac, "train_seeds": args.seeds,
         "holdout_seeds": args.holdout_seeds,
         "opponent": args.opponent,
+        "fitness": args.fitness,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "train_cells": len(train_cells), "holdout_cells": len(holdout_cells),
         "backend": "modal" if args.modal else "local",
@@ -270,7 +278,8 @@ def main():
             # `starter` at ~140k outvotes `v3-fixed` at ~46k about three to one,
             # so the mixture would quietly collapse back into training against
             # `starter` -- the exact bias this change exists to remove.
-            fitness = normalised_fitness([s["banks"] for s in stats])
+            key = "margins" if args.fitness == "margin" else "banks"
+            fitness = normalised_fitness([s[key] for s in stats])
             ranked = sorted(zip(fitness, stats, population), key=lambda t: -t[0])
             elites = [vec for _, _, vec in ranked[:n_elite]]
 
