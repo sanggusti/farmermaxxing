@@ -102,11 +102,14 @@ def resolve_pool(spec):
         if name in BUILTIN:
             resolved.append(name)
         elif name.startswith(TAPE_PREFIX):
+            # Passed through as the NAME. `sim.fastplay._resolve` loads it
+            # where the episode actually runs, so the Modal fan-out ships a
+            # short string rather than ~126 KB of actions per episode --
+            # 1.16 GB per generation at population 384.
             from sim import tape
-            # A fresh instance per resolution: a tape carries a turn counter,
-            # and a reused one would resume mid-season and play nonsense while
-            # still finishing the episode and reporting a plausible bank.
-            resolved.append(tape.load(name[len(TAPE_PREFIX):]))
+            if name[len(TAPE_PREFIX):] not in tape.names():
+                raise ValueError(f"unknown tape {name!r}; have {tape.names()}")
+            resolved.append(name)
         elif name in frozen_names():
             resolved.append(load(name))
         else:

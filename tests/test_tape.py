@@ -78,13 +78,42 @@ def test_tape_passes_rather_than_raising_past_the_end():
     assert a(_obs(29, 23)) == tape.PASS_ACTION
 
 
-def test_pool_resolves_tapes_to_callables():
+def test_pool_passes_tapes_through_as_names_not_objects():
+    """Payload size, not style.
+
+    A tape pickles to ~126 KB and the Modal fan-out ships one opponent per
+    episode -- at population 384 that is 1.16 GB per generation, which stalls
+    the fan-out. sim/tapes/ is inside the mounted sim/ directory, so the name
+    is enough and the worker loads it locally.
+    """
+    import pickle
+
     names = tape.names()
     if not names:
         pytest.skip("no tapes recorded")
-    opps, labels = resolve_pool(f"{TAPE_PREFIX}{names[0]}")
-    assert labels == [f"{TAPE_PREFIX}{names[0]}"]
-    assert callable(opps[0])
+    spec = f"{TAPE_PREFIX}{names[0]}"
+    opps, labels = resolve_pool(spec)
+    assert labels == [spec]
+    assert opps[0] == spec
+    assert len(pickle.dumps(opps[0])) < 200
+
+
+def test_fastplay_resolves_a_tape_name_to_a_working_agent():
+    """The name only helps if the other end can turn it back into an agent."""
+    from sim.fastplay import _resolve
+    from kaggle_environments.envs.kaggriculture import kaggriculture as engine
+
+    names = tape.names()
+    if not names:
+        pytest.skip("no tapes recorded")
+    agent = _resolve(f"{TAPE_PREFIX}{names[0]}", engine)
+    assert callable(agent)
+    assert agent({"day": 0, "hour": 0}) is not None
+
+
+def test_unknown_tape_name_is_rejected_at_resolution():
+    with pytest.raises(ValueError, match="unknown tape"):
+        resolve_pool(f"{TAPE_PREFIX}not-a-real-tape")
 
 
 def test_unknown_opponent_names_the_tapes_too():
