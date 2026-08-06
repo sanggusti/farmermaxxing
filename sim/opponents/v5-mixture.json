@@ -1,4 +1,5 @@
 {
+  "_notes": "CEM vs opponent mixture (starter,v2-cem,v3-fixed,v4-champion), 30gen/384pop; 90,842 clean on the mixture pool vs v4's 79,533; gate passed 2.3 sigma",
   "animal_cash_reserve": 675.0657859969548,
   "distance_penalty": 11.662341593950941,
   "fertilize_enabled": 1,
