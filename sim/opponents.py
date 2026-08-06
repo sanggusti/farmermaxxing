@@ -25,7 +25,18 @@ if os.path.join(REPO, "agent") not in sys.path:
 
 BUILTIN = ("starter", "pass", "random")
 
+# Recorded ladder agents, replayed from their action tapes (see sim/tape.py).
+# The frozen Params pool is entirely our own lineage, so "beats every opponent
+# in the pool" only ever meant "beats earlier versions of itself". Measured
+# against the real thing, v8 lost all five head-to-heads and banked about half.
+TAPE_PREFIX = "tape:"
+
 POOL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "opponents")
+
+
+def tape_names():
+    from sim import tape
+    return tape.names()
 
 
 def frozen_names():
@@ -62,8 +73,15 @@ def freeze(params, name, notes=None):
 def resolve_pool(spec):
     """Turn a comma-separated spec into a list of opponents.
 
-    Accepts built-in names, frozen snapshot names, and the shorthand `all`
-    (every built-in plus every snapshot) or `frozen` (snapshots only).
+    Accepts built-in names, frozen snapshot names, recorded ladder tapes as
+    `tape:<name>`, and the shorthands `all` (built-ins plus snapshots),
+    `frozen` (snapshots only), `tapes` (recorded ladder agents only), and
+    `real` (tapes plus our two most recent snapshots).
+
+    `real` exists because it is the only spec that answers the question that
+    matters. The frozen pool is our own lineage end to end, so beating all of
+    it means beating earlier versions of ourselves; v8 did that 100% of the
+    time and still lost every head-to-head against a recorded ladder agent.
     """
     names = [s.strip() for s in spec.split(",") if s.strip()]
     out = []
@@ -72,6 +90,10 @@ def resolve_pool(spec):
             out += list(BUILTIN) + frozen_names()
         elif name == "frozen":
             out += frozen_names()
+        elif name == "tapes":
+            out += [TAPE_PREFIX + t for t in tape_names()]
+        elif name == "real":
+            out += [TAPE_PREFIX + t for t in tape_names()] + frozen_names()[-2:]
         else:
             out.append(name)
 
@@ -79,12 +101,18 @@ def resolve_pool(spec):
     for name in out:
         if name in BUILTIN:
             resolved.append(name)
+        elif name.startswith(TAPE_PREFIX):
+            from sim import tape
+            # A fresh instance per resolution: a tape carries a turn counter,
+            # and a reused one would resume mid-season and play nonsense while
+            # still finishing the episode and reporting a plausible bank.
+            resolved.append(tape.load(name[len(TAPE_PREFIX):]))
         elif name in frozen_names():
             resolved.append(load(name))
         else:
             raise ValueError(
-                f"unknown opponent {name!r}; "
-                f"built-ins {BUILTIN}, frozen {frozen_names()}"
+                f"unknown opponent {name!r}; built-ins {BUILTIN}, "
+                f"frozen {frozen_names()}, tapes {tape_names()}"
             )
     return resolved, out
 

@@ -184,6 +184,11 @@ def main():
     c = sub.add_parser("census", help="per-day land and portfolio census")
     c.add_argument("--replay", nargs="+", required=True)
 
+    cl = sub.add_parser("clone", help="freeze a replayed seat as a tape opponent")
+    cl.add_argument("--replay", required=True)
+    cl.add_argument("--seat", type=int, required=True)
+    cl.add_argument("--name", required=True)
+
     f = sub.add_parser("fetch", help="download top-N episodes for a date")
     f.add_argument("--date", required=True)
     f.add_argument("--top", type=int, default=20)
@@ -222,6 +227,27 @@ def main():
                     print(f"   d{day:>2} p{p}  ${s['money']:>8,.0f}  q{s['quadrants']}"
                           f"  util {s['util']:>4.0%}  empty {s['empty']:>2}"
                           f"  weeds {s['weeds']:>2}  {mix}")
+        return 0
+
+    if args.cmd == "clone":
+        from sim import tape
+
+        rp = load(args.replay)
+        actions = tape.extract(rp, args.seat)
+        path = tape.save(actions, args.name, meta={
+            "episode": rp.get("info", {}).get("EpisodeId"),
+            "seed": seed_of(rp), "seat": args.seat,
+            "ladder_bank": rp["rewards"][args.seat],
+            "team": names_of(rp)[args.seat],
+        })
+        print(f"wrote {path}")
+        v = tape.verify_tape(args.name)
+        print(f"on unseen seeds: {['%,.0f' % b if False else f'{b:,.0f}' for b in v['banks']]}")
+        if not v["ok"]:
+            print("  DEGENERATE -- the tape does not survive a fresh seed, so it "
+                  "is not a usable opponent. Do not add it to the pool.")
+            return 1
+        print("  non-degenerate; usable as a frozen opponent")
         return 0
 
     if args.cmd == "fetch":
