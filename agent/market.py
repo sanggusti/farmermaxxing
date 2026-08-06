@@ -59,7 +59,32 @@ def sellable_quantity(item, inventory, have, floor_price):
     return n
 
 
-def plan_sales(shed, market_inv, params, day, total_days, max_orders):
+def rival_discount(item, rival_supply, params):
+    """How far to relax our sell floor because a rival is about to supply.
+
+    Returns a multiplier in (0, 1]. At `rival_supply_urgency = 0` it is exactly
+    1.0, so the sell decision is byte-identical to ignoring the opponent.
+
+    The market is the only shared object in the game, and it is worth up to 3x:
+    the same agent banks 141,397 against `starter` and 46,454 against a strong
+    opponent on identical seeds. Selling into a rival's incoming stack is the
+    difference between base price and something near the floor.
+
+    Scaled against `rival_supply_ref` rather than raw units so the parameter
+    means the same thing for eggs (dozens) and melons (a handful).
+    """
+    u = params.rival_supply_urgency
+    if not u:
+        return 1.0
+    incoming = rival_supply.get(item, 0) if rival_supply else 0
+    if incoming <= 0:
+        return 1.0
+    pressure = min(1.0, incoming / max(1.0, params.rival_supply_ref))
+    return max(0.05, 1.0 - u * pressure)
+
+
+def plan_sales(shed, market_inv, params, day, total_days, max_orders,
+               rival_supply=None):
     """Decide this turn's SELL orders.
 
     Returns a list of `["SELL", item, n]`. Unsold shed inventory is worth
@@ -82,7 +107,9 @@ def plan_sales(shed, market_inv, params, day, total_days, max_orders):
         if liquidating:
             n = have
         else:
-            floor = params.sell_floor_frac.get(item, 0.6) * MARKET_PARAMS[item]["base"]
+            floor = (params.sell_floor_frac.get(item, 0.6)
+                     * rival_discount(item, rival_supply, params)
+                     * MARKET_PARAMS[item]["base"])
             n = sellable_quantity(item, inv, have, floor)
             # Never let the shed choke on a product we refuse to sell.
             if sum(shed.values()) >= params.shed_pressure_at:

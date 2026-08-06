@@ -125,6 +125,24 @@ class Params:
     # eats more value than it lays.
     wheat_buy_max_price: float = 46.0
 
+    # --- the opponent -------------------------------------------------------
+    # Their whole farm is public and we have never read it. The market is the
+    # only shared object in the game and it is worth up to 3x: the same agent
+    # banks 141,397 against `starter` and 46,454 against a strong opponent on
+    # identical seeds, and every coin of that gap arrives through prices.
+    #
+    # When a rival is about to harvest a stack of something we hold, our sell
+    # floor for that product relaxes so we trade ahead of their supply rather
+    # than after it. At 0.0 the discount is exactly 1.0 and the sell decision
+    # is byte-identical to ignoring them.
+    rival_supply_urgency: float = 0.0
+    # Units of incoming rival supply that count as full pressure. Normalises
+    # across products so the urgency parameter means the same thing for eggs
+    # (dozens) as for melons (a handful).
+    rival_supply_ref: float = 20.0
+    # How far ahead to count their ripening crops, in days.
+    rival_lookahead_days: int = 2
+
     # Wheat held back to feed animals (days of buffer per animal).
     wheat_reserve_days: float = 1.3
 
@@ -218,6 +236,9 @@ SEARCH_SPACE = {
     "late_target_mult.target_sheep":            (0.0, 4.0, "f"),
 
     "wheat_buy_max_price":    (15, 130, "f"),
+    "rival_supply_urgency":   (0.0, 1.0, "f"),
+    "rival_supply_ref":       (2.0, 80.0, "f"),
+    "rival_lookahead_days":   (0, 6, "i"),
     "wheat_reserve_days":     (0.2, 4.0, "f"),
     "liquidate_days":         (1, 6, "i"),
     "shed_pressure_at":       (30, 98, "i"),
