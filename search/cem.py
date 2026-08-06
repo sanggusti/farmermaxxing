@@ -30,6 +30,10 @@ sys.path[:0] = [REPO, os.path.join(REPO, "agent")]
 
 from params import Params, SEARCH_SPACE, flatten, unflatten   # noqa: E402
 from obs import wandb_setup                                    # noqa: E402
+from sim.arena import CENSUS_KEYS as ARENA_CENSUS_KEYS         # noqa: E402
+from sim.opponents import resolve_pool                         # noqa: E402
+from search.league import (build_cells, normalised_fitness,    # noqa: E402
+                           worst_opponent)
 
 # Searches write to their own run directory, never straight to the tracked
 # agent/params.json. Writing into the working tree means a concurrent command
@@ -71,18 +75,33 @@ def refit(elites, smoothing=0.3, floor=0.02):
     return mean, std
 
 
-def score_local(vectors, seeds, opponent, steps):
-    from sim.arena import evaluate, summarise
+def score_local(vectors, cells, steps, metrics=False):
+    """Same contract as score_modal: one summary per candidate, over `cells`."""
+    from sim.fastplay import fast_play
+    from sim.harness import make_agent
+    from search.modal_app import summarise_cells
+
+    labels = [c[1] for c in cells]
     out = []
     for vec in vectors:
-        rows = evaluate(unflatten(vec), [opponent], seeds, steps)
-        out.append(summarise(rows))
+        params = unflatten(vec)
+        rows = []
+        for opp, _label, seed, seat in cells:
+            me = make_agent(params)
+            a, b = (me, opp) if seat == 0 else (opp, me)
+            r = fast_play(a, b, seed=seed, steps=steps, metrics=metrics)
+            row = {"bank": r["banks"][seat], "opp_bank": r["banks"][1 - seat],
+                   "status": r["statuses"][seat]}
+            if "metrics" in r:
+                row.update(r["metrics"][seat])
+            rows.append(row)
+        out.append(summarise_cells(rows, labels))
     return out
 
 
-def score_modal(vectors, seeds, opponent, steps):
+def score_modal(vectors, cells, steps, metrics=False):
     from search.modal_app import score_population
-    return score_population(vectors, seeds, opponent, steps)
+    return score_population(vectors, cells, steps, metrics=metrics)
 
 
 def modal_session():
@@ -92,6 +111,13 @@ def modal_session():
 
 HOLDOUT_OFFSET = 10_000   # selection seeds: used to pick the champion
 CLEAN_OFFSET = 20_000     # reporting seeds: never used to optimise or select
+
+# How far the champion's worst matchup may slip while its average improves.
+# Not zero: at these sample sizes the worst-opponent mean carries real noise,
+# and rejecting every downward wobble would freeze the search. Not generous
+# either, because a collapsing matchup is a lost match on the ladder however
+# good the average looks.
+WORST_TOLERANCE = 0.05
 
 # Three sets, because two is not enough. Train fits the parameters. Holdout
 # picks the champion, once per generation, which makes it a selection set:
@@ -112,7 +138,18 @@ def main():
     ap.add_argument("--clean-seeds", type=int, default=8,
                     help="seeds touched only once, for an unbiased final number")
     ap.add_argument("--steps", type=int, default=720)
-    ap.add_argument("--opponent", default="starter")
+    ap.add_argument("--opponent", default="starter",
+                    help="single training opponent (legacy; prefer --opponents)")
+    ap.add_argument("--opponents", default=None,
+                    help="pool spec for TRAINING, e.g. 'starter,v3-fixed,"
+                         "v4-champion' or 'all'. Overrides --opponent. "
+                         "Ranking standardises each cell across the population, "
+                         "so a strong opponent is not drowned out by a weak one "
+                         "producing bigger banks.")
+    ap.add_argument("--reference", default=None,
+                    help="pool spec used for SELECTION and reporting. Held "
+                         "fixed so holdout scores stay comparable across "
+                         "generations and across runs. Defaults to --opponents.")
     ap.add_argument("--modal", action="store_true", help="fan out on Modal")
     ap.add_argument("--rng-seed", type=int, default=0)
     ap.add_argument("--group", default=None)
@@ -131,6 +168,18 @@ def main():
     train_seeds = list(range(args.seeds))
     holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
     clean_seeds = [CLEAN_OFFSET + i for i in range(args.clean_seeds)]
+
+    # Training pool may vary; the reference pool must not. Selection and the
+    # final clean number are both measured on the reference, so that a holdout
+    # score from generation 2 and one from generation 29 mean the same thing.
+    train_pool_spec = args.opponents or args.opponent
+    ref_pool_spec = args.reference or train_pool_spec
+    train_opps, train_labels = resolve_pool(train_pool_spec)
+    ref_opps, ref_labels = resolve_pool(ref_pool_spec)
+
+    train_cells = build_cells(train_opps, train_labels, train_seeds)
+    holdout_cells = build_cells(ref_opps, ref_labels, holdout_seeds)
+    clean_cells = build_cells(ref_opps, ref_labels, clean_seeds)
     if args.init_params:
         base = Params.from_json(args.init_params)
         spread = args.init_spread if args.init_spread is not None else 0.10
@@ -153,12 +202,16 @@ def main():
     # handful of seeds, the train score is a fitting artefact; the ladder scores
     # us on episodes we have never seen.
     best_holdout, best_vec, best_train = float("-inf"), None, None
+    best_worst = None
 
     with backend_session, wandb_setup.start("cem", group=group, tags=["cem"], config={
         "generations": args.generations, "population": args.population,
         "elite_frac": args.elite_frac, "train_seeds": args.seeds,
         "holdout_seeds": args.holdout_seeds,
-        "opponent": args.opponent, "backend": "modal" if args.modal else "local",
+        "opponent": args.opponent,
+        "train_opponents": train_labels, "reference_opponents": ref_labels,
+        "train_cells": len(train_cells), "holdout_cells": len(holdout_cells),
+        "backend": "modal" if args.modal else "local",
         "init_params": args.init_params or "defaults", "init_spread": spread,
     }) as run:
 
@@ -169,34 +222,55 @@ def main():
             if gen == 0:
                 population[0] = flatten(base)
 
-            stats = score(population, train_seeds, args.opponent, args.steps)
-            ranked = sorted(zip(stats, population), key=lambda sp: -sp[0]["mean_bank"])
-            elites = [vec for _, vec in ranked[:n_elite]]
+            stats = score(population, train_cells, args.steps)
+            # Rank on per-cell z-scores, not raw mean bank. With a mixed pool a
+            # raw mean is dominated by whichever opponent pays the most coins:
+            # `starter` at ~140k outvotes `v3-fixed` at ~46k about three to one,
+            # so the mixture would quietly collapse back into training against
+            # `starter` -- the exact bias this change exists to remove.
+            fitness = normalised_fitness([s["banks"] for s in stats])
+            ranked = sorted(zip(fitness, stats, population), key=lambda t: -t[0])
+            elites = [vec for _, _, vec in ranked[:n_elite]]
 
             # Re-score the elites on unseen seeds and pick the generation's
             # champion there. Only the elites, to keep the extra cost small.
-            hold_stats = score(elites, holdout_seeds, args.opponent, args.steps)
+            # Census only on the elite re-scoring: it is a fraction of the
+            # episodes and these are the numbers that get reported, so the
+            # sampling cost never lands on the hot path.
+            hold_stats = score(elites, holdout_cells, args.steps, metrics=True)
+            # Selection stays on raw mean bank over the FIXED reference pool.
+            # z-scores are relative to one population, so they cannot be
+            # compared across generations -- and the champion must be.
             hold_ranked = sorted(zip(hold_stats, elites),
                                  key=lambda sp: -sp[0]["mean_bank"])
             champion_stats, champion_vec = hold_ranked[0]
 
-            if champion_stats["mean_bank"] > best_holdout:
+            # Promote on the aggregate, but refuse a champion that buys its
+            # average by collapsing against one opponent. The ladder scores
+            # wins and losses, so trading a matchup away for coins elsewhere
+            # loses matches even as the mean rises. This is the gate's
+            # fourth check, moved into the loop where it can still steer.
+            worst_label, worst_bank = worst_opponent(champion_stats)
+            regressed = (best_worst is not None
+                         and worst_bank < best_worst * (1 - WORST_TOLERANCE))
+            if champion_stats["mean_bank"] > best_holdout and not regressed:
                 best_holdout = champion_stats["mean_bank"]
+                best_worst = worst_bank if best_worst is None else max(best_worst, worst_bank)
                 best_vec = champion_vec
-                best_train = ranked[0][0]["mean_bank"]
+                best_train = ranked[0][1]["mean_bank"]
                 unflatten(best_vec).to_json(best_path)
 
             new_mean, new_std = refit(elites)
             mean = {k: (1 - 0.3) * new_mean[k] + 0.3 * mean[k] for k in mean}
             std = new_std
 
-            train_best = ranked[0][0]["mean_bank"]
+            train_best = ranked[0][1]["mean_bank"]
             row = {
                 "gen": gen,
                 "train_best_bank": train_best,
                 "train_pop_mean_bank": statistics.mean([s["mean_bank"] for s in stats]),
                 "train_elite_mean_bank": statistics.mean(
-                    [s["mean_bank"] for s, _ in ranked[:n_elite]]),
+                    [s["mean_bank"] for _, s, _ in ranked[:n_elite]]),
                 "holdout_best_bank": champion_stats["mean_bank"],
                 "holdout_win_rate": champion_stats["win_rate"],
                 "holdout_min_bank": champion_stats["min_bank"],
@@ -204,21 +278,42 @@ def main():
                 "generalisation_gap": train_best - champion_stats["mean_bank"],
                 "best_holdout_overall": best_holdout,
             }
+            # Land and breadth census for the generation champion. Diagnostics,
+            # never fitness -- optimising a proxy for "using the farm" instead
+            # of the bank is how you get a farm that looks busy and earns less.
+            for key in ARENA_CENSUS_KEYS:
+                if f"mean_{key}" in champion_stats:
+                    row[f"holdout_{key}"] = champion_stats[f"mean_{key}"]
+            # Per-opponent, every generation. The 141k-vs-46k spread was only
+            # discovered at the end of a search; logged here it is visible while
+            # the run is still going, which is the point of watching at all.
+            for label, b in (champion_stats.get("by_opponent") or {}).items():
+                row[f"vs/{label}/mean_bank"] = b["mean_bank"]
+                row[f"vs/{label}/win_rate"] = b["win_rate"]
+            row["worst_opponent_bank"] = worst_bank
             run.log(row)
             print(f"gen {gen:>2}  train {train_best:>11,.0f}  "
                   f"holdout {champion_stats['mean_bank']:>11,.0f}  "
                   f"gap {row['generalisation_gap']:>10,.0f}  "
-                  f"win {champion_stats['win_rate']:.0%}")
+                  f"win {champion_stats['win_rate']:.0%}  "
+                  f"worst {worst_label} {worst_bank:>10,.0f}"
+                  + ("  [rejected: worst regressed]" if regressed else ""))
 
         # One evaluation on seeds the search never saw. The difference against
         # the selection score IS the selection bias, so measure it rather than
         # arguing about whether it exists.
         clean = None
         if best_vec is not None:
-            clean = score([best_vec], clean_seeds, args.opponent, args.steps)[0]
+            clean = score([best_vec], clean_cells, args.steps, metrics=True)[0]
             run.summary["clean_bank"] = clean["mean_bank"]
             run.summary["clean_min_bank"] = clean["min_bank"]
             run.summary["selection_bias"] = best_holdout - clean["mean_bank"]
+            for label, b in (clean.get("by_opponent") or {}).items():
+                run.summary[f"clean_vs/{label}/mean_bank"] = b["mean_bank"]
+                run.summary[f"clean_vs/{label}/win_rate"] = b["win_rate"]
+            for key in ARENA_CENSUS_KEYS:
+                if f"mean_{key}" in clean:
+                    run.summary[f"clean_{key}"] = clean[f"mean_{key}"]
 
         run.summary["best_holdout_bank"] = best_holdout
         run.summary["best_train_bank"] = best_train
@@ -231,6 +326,10 @@ def main():
         bias = best_holdout - clean["mean_bank"]
         print(f"clean (unbiased)  : {clean['mean_bank']:>12,.0f}  "
               f"worst {clean['min_bank']:,.0f}")
+        print("clean per opponent:")
+        for label, b in sorted((clean.get("by_opponent") or {}).items()):
+            print(f"  {label:<22} bank {b['mean_bank']:>11,.0f}   "
+                  f"win {b['win_rate']:>6.1%}")
         print(f"selection bias    : {bias:>+12,.0f}  "
               f"({bias / clean['mean_bank']:+.1%} of the clean score)")
         print("\nQuote the clean number. The selection score is what the search")
