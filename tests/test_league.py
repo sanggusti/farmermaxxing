@@ -167,3 +167,30 @@ def test_normalised_fitness_works_on_margins_too():
     # exactly as for banks.
     assert fit[0] == pytest.approx(0.0, abs=1e-9)
     assert fit[1] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_selection_score_follows_the_fitness_it_was_ranked_on():
+    """Ranking on margin while selecting on bank is incoherent.
+
+    v8's elites were margin-good, then the bank-best of them was chosen. It
+    won every matchup and its mean bank stayed flat, which is exactly what
+    optimising one quantity and picking on another produces.
+    """
+    from search.cem import selection_score
+
+    stats = {
+        "mean_bank": 90_000,
+        "by_opponent": {
+            "starter": {"mean_bank": 130_000, "mean_margin": +100_000},
+            "v3-fixed": {"mean_bank": 70_000, "mean_margin": +10_000},
+            "v5": {"mean_bank": 70_000, "mean_margin": -2_000},
+        },
+    }
+    assert selection_score(stats, "mean_bank") == 90_000
+    # Equal weight per opponent, not per episode.
+    assert selection_score(stats, "mean_margin") == pytest.approx(36_000)
+
+
+def test_selection_score_falls_back_to_bank_without_a_breakdown():
+    from search.cem import selection_score
+    assert selection_score({"mean_bank": 42.0}, "mean_margin") == 42.0

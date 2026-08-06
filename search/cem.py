@@ -132,6 +132,21 @@ def score_modal(vectors, cells, steps, metrics=False):
     return score_population(vectors, cells, steps, metrics=metrics)
 
 
+def selection_score(stats, key):
+    """The champion-selection number: mean bank, or mean margin over the pool.
+
+    `summarise_cells` reports margin per opponent but not in aggregate, so the
+    pooled margin is averaged across opponents here. Equal weight per opponent
+    rather than per episode, which matters when the pool is unbalanced.
+    """
+    if key == "mean_bank":
+        return stats["mean_bank"]
+    by_opp = stats.get("by_opponent") or {}
+    if not by_opp:
+        return stats["mean_bank"]
+    return statistics.mean([b["mean_margin"] for b in by_opp.values()])
+
+
 def modal_session():
     from search.modal_app import session
     return session()
@@ -289,11 +304,20 @@ def main():
             # episodes and these are the numbers that get reported, so the
             # sampling cost never lands on the hot path.
             hold_stats = score(elites, holdout_cells, args.steps, metrics=True)
-            # Selection stays on raw mean bank over the FIXED reference pool.
-            # z-scores are relative to one population, so they cannot be
-            # compared across generations -- and the champion must be.
+            # Selection uses the SAME quantity the population was ranked on,
+            # in raw units over the FIXED reference pool. Raw rather than
+            # z-scored because z-scores are relative to one population and the
+            # champion must be comparable across generations; fixed pool for
+            # the same reason.
+            #
+            # Ranking on margin while selecting on bank is incoherent, and it
+            # showed: v8's elites were margin-good, then the bank-best of them
+            # was chosen, and the result won every matchup while its mean bank
+            # stayed flat. Mean margin over a fixed pool is just as comparable
+            # across generations as mean bank, so there is no reason to mix.
+            sel_key = "mean_margin" if args.fitness == "margin" else "mean_bank"
             hold_ranked = sorted(zip(hold_stats, elites),
-                                 key=lambda sp: -sp[0]["mean_bank"])
+                                 key=lambda sp: -selection_score(sp[0], sel_key))
             champion_stats, champion_vec = hold_ranked[0]
 
             # Promote on the aggregate, but refuse a champion that buys its
@@ -310,8 +334,8 @@ def main():
                             WORST_TOLERANCE_FLOOR)
             regressed = (best_worst is not None
                          and worst_margin < best_worst - tolerance)
-            if champion_stats["mean_bank"] > best_holdout and not regressed:
-                best_holdout = champion_stats["mean_bank"]
+            if selection_score(champion_stats, sel_key) > best_holdout and not regressed:
+                best_holdout = selection_score(champion_stats, sel_key)
                 best_worst = worst_margin if best_worst is None else max(best_worst, worst_margin)
                 best_vec = champion_vec
                 best_train = ranked[0][1]["mean_bank"]
@@ -333,7 +357,10 @@ def main():
                 "holdout_min_bank": champion_stats["min_bank"],
                 # A widening gap is the overfitting signal to watch.
                 "generalisation_gap": train_best - champion_stats["mean_bank"],
+                # In the units the champion was SELECTED on: mean bank, or
+                # mean margin over the reference pool. Not interchangeable.
                 "best_holdout_overall": best_holdout,
+                "selection_metric": sel_key,
             }
             # Land and breadth census for the generation champion. Diagnostics,
             # never fitness -- optimising a proxy for "using the farm" instead
@@ -378,7 +405,9 @@ def main():
             wandb_setup.log_params_artifact(
                 run, best_path, metadata={"holdout_mean_bank": best_holdout})
 
-    print(f"\nselection holdout : {best_holdout:>12,.0f}")
+    label = "margin" if args.fitness == "margin" else "bank"
+    print(f"\nselection holdout : {best_holdout:>12,.0f}  (mean {label} over "
+          f"the reference pool)")
     if clean is not None:
         bias = best_holdout - clean["mean_bank"]
         print(f"clean (unbiased)  : {clean['mean_bank']:>12,.0f}  "
