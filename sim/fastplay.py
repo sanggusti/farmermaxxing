@@ -19,6 +19,8 @@ you only need the score, which is every search episode.
 import os
 import sys
 
+from sim.census import EpisodeCensus, TURNS_PER_DAY
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if os.path.join(REPO, "agent") not in sys.path:
     sys.path.insert(0, os.path.join(REPO, "agent"))
@@ -53,11 +55,16 @@ def _resolve(spec, engine):
     )
 
 
-def fast_play(agent_a, agent_b, seed=0, steps=720):
+def fast_play(agent_a, agent_b, seed=0, steps=720, metrics=False):
     """Play one episode and return {'banks', 'winner', 'statuses'}.
 
     Same return shape as `sim.harness.play` minus the `env`, which cannot be
     provided because no step history is kept. That omission is the entire point.
+
+    `metrics=True` additionally returns 'metrics': a per-player dict of land and
+    action statistics (see sim.census). It is off by default because every
+    search episode goes through here and the sampling, though cheap, is not
+    free -- and because the banks must be provably unaffected by asking for it.
     """
     from kaggle_environments import make
     from kaggle_environments.envs.kaggriculture import kaggriculture as engine
@@ -77,16 +84,26 @@ def fast_play(agent_a, agent_b, seed=0, steps=720):
     # into each agent's own observation, which is what an agent actually sees.
     shared = env._Environment__get_shared_state
 
+    census = EpisodeCensus(2) if metrics else None
+
     for step in range(steps - 1):
         actions = []
         for i in range(2):
             obs = shared(i).observation
+            if census is not None and i == 0 and step % TURNS_PER_DAY == 0:
+                # Sample once per day, from the shared farms view, before any
+                # action this turn. Both players come off player 0's obs.
+                census.sample_day(obs["farms"], obs["day"])
             try:
                 actions.append(agents[i](obs))
             except Exception:
                 # Mirror core.py: a raising agent is ERROR, not a crash.
                 state[i].status = "ERROR"
                 actions.append(None)
+
+        if census is not None:
+            for i in range(2):
+                census.record_action(i, actions[i])
 
         # Mutate in place rather than rebuilding and re-structifying the state
         # each step; structify was a large share of the remaining overhead.
@@ -106,5 +123,12 @@ def fast_play(agent_a, agent_b, seed=0, steps=720):
     banks = [float(s.reward) if s.reward is not None else float("nan")
              for s in state]
     winner = -1 if banks[0] == banks[1] else (0 if banks[0] > banks[1] else 1)
-    return {"seed": seed, "banks": banks, "winner": winner,
-            "statuses": [s.status for s in state]}
+    out = {"seed": seed, "banks": banks, "winner": winner,
+           "statuses": [s.status for s in state]}
+    if census is not None:
+        census.finish([state[i].observation["private"].get("shed", {})
+                       for i in range(2)],
+                      town=state[0].observation.get("town"))
+        out["metrics"] = [census.result(i) for i in range(2)]
+        out["shop_order"] = census.shop_order
+    return out

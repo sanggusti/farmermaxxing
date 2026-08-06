@@ -96,3 +96,34 @@ def test_unresolvable_opponent_raises_rather_than_going_quiet():
     """Failing loudly beats a plausible-looking wrong number."""
     with pytest.raises(TypeError, match="not callable"):
         fast_play(make_agent(Params()), object(), seed=0, steps=48)
+
+
+@pytest.mark.parametrize("seed", [0, 7, 20000, 20001])
+def test_metrics_do_not_change_the_episode(seed):
+    """Asking for the land census must not perturb a single coin.
+
+    The census samples state mid-episode. If that sampling ever mutated the
+    state -- a structify, a dict rebuilt in place, a generator consumed -- the
+    banks would shift silently and every search after it would be optimising a
+    different game than the one the ladder scores.
+    """
+    plain = fast_play("starter", "starter", seed=seed, steps=720)
+    counted = fast_play("starter", "starter", seed=seed, steps=720, metrics=True)
+
+    assert plain["banks"] == counted["banks"]
+    assert plain["statuses"] == counted["statuses"]
+    assert "metrics" not in plain
+    assert len(counted["metrics"]) == 2
+
+
+def test_metrics_report_land_that_matches_the_final_state():
+    """The census denominator must be tiles we own, not tiles that exist."""
+    r = fast_play(make_agent(Params()), "starter", seed=0, steps=720,
+                  metrics=True)
+    m = r["metrics"][0]
+
+    assert 0.0 <= m["productive_tile_day_frac"] <= 1.0
+    assert 1 <= m["max_quadrants"] <= 4
+    # One quadrant is 25 tiles; owning more only ever raises the mean.
+    assert m["mean_unlocked_tiles"] >= 25.0
+    assert m["plant_actions_per_day"] >= 0.0

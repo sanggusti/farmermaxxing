@@ -20,7 +20,7 @@ import argparse
 import statistics
 import sys
 
-from sim.arena import evaluate, summarise, per_opponent
+from sim.arena import evaluate, summarise, per_opponent, shop_order_confound
 from sim.opponents import resolve_pool
 from params import Params
 from obs import wandb_setup
@@ -70,14 +70,17 @@ def run_gate(candidate, champion, pool_spec, n_seeds, steps,
     opponents, labels = resolve_pool(pool_spec)
     seeds = [offset + i for i in range(n_seeds)]
 
-    cand_rows = evaluate(candidate, opponents, seeds, steps, labels=labels)
-    champ_rows = evaluate(champion, opponents, seeds, steps, labels=labels)
+    cand_rows = evaluate(candidate, opponents, seeds, steps, labels=labels,
+                         metrics=True)
+    champ_rows = evaluate(champion, opponents, seeds, steps, labels=labels,
+                          metrics=True)
     cand, champ = summarise(cand_rows), summarise(champ_rows)
     by_opp = per_opponent(cand_rows)
 
     checks, delta, combined_se = decide(
         cand, champ, by_opp, margin_sigmas, floor_tolerance)
-    return checks, cand, champ, by_opp, delta, combined_se
+    return (checks, cand, champ, by_opp, delta, combined_se,
+            cand_rows, champ_rows)
 
 
 def main():
@@ -104,7 +107,7 @@ def main():
         os.environ["WANDB_MODE"] = "disabled"
 
     offset = HOLDOUT_OFFSET if args.on_selection_seeds else CLEAN_OFFSET
-    checks, cand, champ, by_opp, delta, se = run_gate(
+    checks, cand, champ, by_opp, delta, se, cand_rows, champ_rows = run_gate(
         candidate, champion, args.opponents, args.seeds, args.steps,
         args.margin_sigmas, args.floor_tolerance, offset=offset)
     passed = all(ok for _, ok, _ in checks)
@@ -119,6 +122,31 @@ def main():
     print(f"{'champion':<12} {champ['mean_bank']:>12,.0f} {champ['min_bank']:>12,.0f} {champ['win_rate']:>7.1%}")
     print(f"{'delta':<12} {delta:>+12,.0f} (1 sigma = {se:,.0f})")
     print()
+    # Reporting only -- deliberately NOT a check in `decide`. These explain
+    # WHERE a delta came from; making them pass/fail would be hand-tuning the
+    # objective, and a farm can legitimately earn more from fewer tiles.
+    if "mean_productive_tile_day_frac" in cand:
+        print(f"{'':<12} {'land used':>12} {'quadrants':>12} {'products':>9} {'unsold':>8}")
+        for name, s in (("candidate", cand), ("champion", champ)):
+            print(f"{name:<12} {s['mean_productive_tile_day_frac']:>11.1%} "
+                  f"{s['mean_max_quadrants']:>12.2f} "
+                  f"{s['mean_products_sold_distinct']:>9.1f} "
+                  f"{s['mean_end_shed_units']:>8.0f}")
+        cf_c = shop_order_confound(cand_rows)
+        cf_h = shop_order_confound(champ_rows)
+        if cf_c and cf_h:
+            print(f"shop-unlock confound: candidate omega^2 {cf_c['omega_sq']:.2f}"
+                  f" ({cf_c['n_groups']} first-shops, smallest group"
+                  f" {cf_c['min_group']}),  champion omega^2 {cf_h['omega_sq']:.2f}")
+            if cf_c["omega_sq"] > 0.25 and cf_c["min_group"] >= 3:
+                print("  WARNING: a large share of the candidate's bank spread tracks"
+                      " which shop\n  unlocked first. Land-fill changes shift that RNG"
+                      " draw, so reproduce the gain\n  against opponents with different"
+                      " land-fill profiles before believing it.")
+            elif cf_c["min_group"] < 3:
+                print("  (too few seeds per first-shop group to read this; "
+                      "raise --seeds to use it)")
+        print()
     print("per opponent (candidate):")
     for name, b in sorted(by_opp.items()):
         print(f"  {name:<22} bank {b['mean_bank']:>11,.0f}   win {b['win_rate']:>6.1%}")
