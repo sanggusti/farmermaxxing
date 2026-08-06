@@ -71,14 +71,33 @@ def normalised_fitness(all_banks):
 
 
 def worst_opponent(stats):
-    """(label, mean_bank) of the opponent this candidate does worst against.
+    """(label, mean_margin) of the opponent this candidate does worst against.
 
     The aggregate hides exactly the regression that matters: gaining against
     the built-ins while losing to the strongest frozen champion nets out to
     roughly no change, and the ladder is full of strong opponents.
+
+    **Margin, not bank level.** The first version of this ranked opponents by
+    mean bank, and it failed silently. The v6 search picked a champion whose
+    bank against `v5-mixture` was 81,623 -- the second-highest number in its
+    per-opponent column -- while losing **100%** of those matches. In a shared
+    market both banks rise together when neither player is dumping, so a high
+    absolute bank against a strong opponent can mean "we both did well and they
+    did better", which is a loss.
+
+    Margin rather than win rate because win rate is one coarse bit per episode
+    and far noisier at 16 episodes; `sim/arena.py` records that win rate is used
+    "only as the final gate before a submission, never for tuning". Margin keeps
+    the low variance of bank while measuring the thing that decides the match.
     """
     by_opp = stats.get("by_opponent") or {}
     if not by_opp:
         return None, float("nan")
-    label = min(by_opp, key=lambda k: by_opp[k]["mean_bank"])
-    return label, by_opp[label]["mean_bank"]
+    # Fall back to bank only if margin is absent, so an older scorer degrades
+    # to the previous behaviour rather than raising.
+    def key(k):
+        b = by_opp[k]
+        return b["mean_margin"] if "mean_margin" in b else b["mean_bank"]
+
+    label = min(by_opp, key=key)
+    return label, key(label)

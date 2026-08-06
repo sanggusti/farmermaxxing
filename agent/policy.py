@@ -18,7 +18,7 @@ easier to read.
 """
 
 from rules import (
-    CROPS, ANIMALS, MOVES, LAND_PRICES,
+    CROPS, ANIMALS, MOVES, LAND_PRICES, MARKET_PARAMS,
     fib_hire_cost, is_shed_adjacent, water_bonus_window, shed_access_tiles,
 )
 from market import plan_sales, keep_wheat_for_feeding
@@ -66,7 +66,8 @@ class Policy:
         board = len(me["tiles"])
 
         units = self._units(me, private)
-        tasks = self._build_tasks(me, private, day, board)
+        tasks = self._build_tasks(me, private, day, board,
+                                  obs["market"]["prices"])
         assignment = self._assign(units, tasks, board)
 
         farmer_action = assignment.get(0, ["PASS"])
@@ -115,7 +116,7 @@ class Policy:
         return counts, crops
 
     # ----------------------------------------------------------------- tasks
-    def _build_tasks(self, me, private, day, board):
+    def _build_tasks(self, me, private, day, board, prices=None):
         p = self.p
         tasks = []
         counts, crops = self._scan(me)
@@ -123,7 +124,7 @@ class Policy:
         seeds = private.get("seeds", {})
 
         scale = len(me["unlocked_quadrants"])
-        want = self._wanted_crop(counts, crops, day, scale)
+        want = self._wanted_crop(counts, crops, day, scale, prices)
 
         # Never queue more PLANT tasks than we hold seeds. The engine validates
         # planting atomically per crop:
@@ -148,8 +149,8 @@ class Policy:
                     if plant_budget > 0:
                         tasks.append(Task(p.prio_plant, pos, ["PLANT", want], f"plant-{want}"))
                         plant_budget -= 1
-                    elif self._needs_structure(counts, scale):
-                        kind = self._needs_structure(counts, scale)
+                    elif self._needs_structure(counts, day, scale):
+                        kind = self._needs_structure(counts, day, scale)
                         tasks.append(Task(p.prio_build, pos, [f"BUILD_{kind}"], f"build-{kind}"))
                     continue
 
@@ -277,17 +278,39 @@ class Policy:
             out.append(Task(p.prio_care, pos, ["CARE"], "care"))
         return out
 
-    def _needs_structure(self, counts, scale=1):
+    def _target(self, kind, day, scale=1):
+        """Target count for `kind`, scaled by land and by the season stage.
+
+        Targets were static for all 30 days while the farm's situation is not.
+        Measured on the champion, land utilisation peaks at 76% on day 19 and
+        then falls monotonically to 24% by day 29 -- 57 of 75 tiles idle while
+        holding $119,915. The cause is in `_wanted_crop`: melon and strawberry
+        have `first_yield_day` 10, so `plant_cutoff_slack` stops planting them
+        after day 18, and nothing in the portfolio replaces them. Wheat and
+        carrot mature in 2 days and could be planted until day 26.
+
+        `late_target_mult` lets the search shift the mix at `mix_switch_day`
+        instead of committing to one portfolio for the whole season. It is a
+        multiplier rather than a second target vector deliberately: CEM then
+        learns the *shift*, which is a much smaller correlated move than a
+        whole second portfolio, and the identity multiplier is a no-op.
+        """
+        base = getattr(self.p, kind) * scale
+        if day < self.p.mix_switch_day:
+            return base
+        return base * self.p.late_target_mult.get(kind, 1.0)
+
+    def _needs_structure(self, counts, day=0, scale=1):
         """Which structure to build next, if any."""
-        p = self.p
-        if counts["GOOSE"] + counts["COOP"] < p.target_geese * scale:
+        if counts["GOOSE"] + counts["COOP"] < self._target("target_geese", day, scale):
             return "COOP"
-        pasture_want = (p.target_cows + p.target_sheep) * scale
+        pasture_want = (self._target("target_cows", day, scale)
+                        + self._target("target_sheep", day, scale))
         if counts["COW"] + counts["SHEEP"] + counts["PASTURE"] < pasture_want:
             return "PASTURE"
         return None
 
-    def _wanted_crop(self, counts, crops, day, scale=1):
+    def _wanted_crop(self, counts, crops, day, scale=1, prices=None):
         """Which crop a free tile should get, or None.
 
         Picks the crop with the largest *relative* shortfall rather than the
@@ -306,24 +329,35 @@ class Policy:
         p = self.p
         days_left = TOTAL_DAYS - day
         targets = [
-            ("WHEAT", p.target_wheat_tiles),
-            ("MELON", p.target_melon_tiles),
-            ("CARROT", p.target_carrot_tiles),
-            ("TOMATO", p.target_tomato_tiles),
-            ("STRAWBERRY", p.target_strawberry_tiles),
+            ("WHEAT", "target_wheat_tiles"),
+            ("MELON", "target_melon_tiles"),
+            ("CARROT", "target_carrot_tiles"),
+            ("TOMATO", "target_tomato_tiles"),
+            ("STRAWBERRY", "target_strawberry_tiles"),
         ]
 
-        best, best_short = None, 0.0
-        for crop, target in targets:
-            want = target * scale
+        best, best_score = None, 0.0
+        for crop, attr in targets:
+            want = self._target(attr, day, scale)
             if want <= 0 or crops[crop] >= want:
                 continue
             # Don't plant what cannot mature before the season ends.
             if CROPS[crop]["first_yield_day"] + p.plant_cutoff_slack > days_left:
                 continue
-            shortfall = (want - crops[crop]) / want
-            if shortfall > best_short:
-                best, best_short = crop, shortfall
+            score = (want - crops[crop]) / want
+            # Weight the shortfall by how well the crop is currently paying.
+            # Seven of nine products end the season ABOVE base with market
+            # inventory below I0 -- the town drains faster than two players
+            # supply -- and the only two we push to a discount are the two we
+            # concentrate on. At elasticity 0 this is x**0 == 1, so the default
+            # is byte-identical to ranking on shortfall alone.
+            if prices and p.crop_price_elasticity:
+                base_price = MARKET_PARAMS[crop]["base"]
+                now = prices.get(crop)
+                if now and base_price:
+                    score *= (now / base_price) ** p.crop_price_elasticity
+            if score > best_score:
+                best, best_score = crop, score
         return best
 
     # ------------------------------------------------------------ assignment
@@ -418,9 +452,10 @@ class Policy:
         # an animal with nowhere to live sits in the shed, and an unfed one is
         # gone for good after two days.
         carried = self._carried(private)
-        for name, target in (("GOOSE", p.target_geese * scale),
-                             ("COW", p.target_cows * scale),
-                             ("SHEEP", p.target_sheep * scale)):
+        for name, target in (
+                ("GOOSE", self._target("target_geese", day, scale)),
+                ("COW", self._target("target_cows", day, scale)),
+                ("SHEEP", self._target("target_sheep", day, scale))):
             structure = ANIMALS[name]["structure"]
             in_transit = shed.get(name, 0) + carried.get(name, 0)
             owned = counts[name] + in_transit
@@ -437,7 +472,8 @@ class Policy:
 
         # 4. Seeds. Buy enough to keep every idle unit planting -- seeds are the
         # cheapest thing on the board and running dry stalls the whole farm.
-        want = self._wanted_crop(counts, crops, day, scale)
+        want = self._wanted_crop(counts, crops, day, scale,
+                                 obs["market"]["prices"])
         if want:
             held = seeds.get(want, 0)
             need_seeds = min(counts["empty"], p.seed_batch) - held

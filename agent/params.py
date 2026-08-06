@@ -62,6 +62,36 @@ class Params:
     # Stop planting slow crops once they cannot mature before the season ends.
     plant_cutoff_slack: int = 1
 
+    # --- season stages -------------------------------------------------------
+    # Targets used to be static for all 30 days. Measured on the champion, land
+    # utilisation peaks at 76% on day 19 and falls to 24% by day 29 -- 57 of 75
+    # tiles idle while holding $119,915 -- because melon and strawberry
+    # (first_yield_day 10) stop being plantable after day 18 and nothing in the
+    # portfolio replaces them. Wheat and carrot mature in 2 days and could run
+    # to day 26; they are also two of the products that end the season above
+    # base price with market inventory below I0.
+    #
+    # A multiplier rather than a second target vector: the search then learns
+    # the SHIFT, a much smaller correlated move, and 1.0 everywhere is a no-op.
+    mix_switch_day: int = 30          # 30 = never switch
+    late_target_mult: dict = field(default_factory=lambda: {
+        "target_wheat_tiles": 1.0,
+        "target_carrot_tiles": 1.0,
+        "target_tomato_tiles": 1.0,
+        "target_strawberry_tiles": 1.0,
+        "target_melon_tiles": 1.0,
+        "target_geese": 1.0,
+        "target_cows": 1.0,
+        "target_sheep": 1.0,
+    })
+
+    # Weight a crop's shortfall by how well it is currently paying, as
+    # (price / base) ** elasticity. At 0.0 this is x**0 == 1, so the crop
+    # ranking is byte-identical to shortfall alone. Above 0 the mix follows the
+    # market, which matters because seven of nine products end the season ABOVE
+    # base while we sell only three.
+    crop_price_elasticity: float = 0.0
+
     # --- market -------------------------------------------------------------
     # Sell a unit only while its price stays >= frac * base. Premium goods get a
     # high floor (drip them); staples get a low one (dump them).
@@ -156,6 +186,20 @@ SEARCH_SPACE = {
     "animal_cash_reserve":    (0, 4000, "f"),
     "seed_batch":             (2, 28, "i"),
     "plant_cutoff_slack":     (0, 8, "i"),
+
+    # Season-stage mix. Defaults (switch at 30, all multipliers 1.0, elasticity
+    # 0.0) reproduce the previous behaviour exactly, so a warm start begins at
+    # a known-good point rather than somewhere new.
+    "mix_switch_day":         (8, 30, "i"),
+    "crop_price_elasticity":  (0.0, 3.0, "f"),
+    "late_target_mult.target_wheat_tiles":      (0.0, 6.0, "f"),
+    "late_target_mult.target_carrot_tiles":     (0.0, 6.0, "f"),
+    "late_target_mult.target_tomato_tiles":     (0.0, 6.0, "f"),
+    "late_target_mult.target_strawberry_tiles": (0.0, 6.0, "f"),
+    "late_target_mult.target_melon_tiles":      (0.0, 6.0, "f"),
+    "late_target_mult.target_geese":            (0.0, 4.0, "f"),
+    "late_target_mult.target_cows":             (0.0, 4.0, "f"),
+    "late_target_mult.target_sheep":            (0.0, 4.0, "f"),
 
     "wheat_buy_max_price":    (15, 130, "f"),
     "wheat_reserve_days":     (0.2, 4.0, "f"),
