@@ -391,7 +391,14 @@ def main():
             clean = score([best_vec], clean_cells, args.steps, metrics=True)[0]
             run.summary["clean_bank"] = clean["mean_bank"]
             run.summary["clean_min_bank"] = clean["min_bank"]
-            run.summary["selection_bias"] = best_holdout - clean["mean_bank"]
+            # Compare like with like. `best_holdout` is in the units the
+            # champion was SELECTED on, which under margin fitness is a margin,
+            # not a bank. Subtracting a bank from a margin produced a reported
+            # bias of -134% of the clean score on the v9 run -- a number with
+            # no meaning that still looked like a measurement.
+            clean_sel = selection_score(clean, sel_key)
+            run.summary["clean_selection_score"] = clean_sel
+            run.summary["selection_bias"] = best_holdout - clean_sel
             for label, b in (clean.get("by_opponent") or {}).items():
                 run.summary[f"clean_vs/{label}/mean_bank"] = b["mean_bank"]
                 run.summary[f"clean_vs/{label}/win_rate"] = b["win_rate"]
@@ -405,19 +412,21 @@ def main():
             wandb_setup.log_params_artifact(
                 run, best_path, metadata={"holdout_mean_bank": best_holdout})
 
-    label = "margin" if args.fitness == "margin" else "bank"
-    print(f"\nselection holdout : {best_holdout:>12,.0f}  (mean {label} over "
+    unit = "margin" if args.fitness == "margin" else "bank"
+    print(f"\nselection holdout : {best_holdout:>12,.0f}  (mean {unit} over "
           f"the reference pool)")
     if clean is not None:
-        bias = best_holdout - clean["mean_bank"]
+        bias = best_holdout - selection_score(clean, sel_key)
         print(f"clean (unbiased)  : {clean['mean_bank']:>12,.0f}  "
               f"worst {clean['min_bank']:,.0f}")
         print("clean per opponent:")
         for label, b in sorted((clean.get("by_opponent") or {}).items()):
             print(f"  {label:<22} bank {b['mean_bank']:>11,.0f}   "
                   f"win {b['win_rate']:>6.1%}")
-        print(f"selection bias    : {bias:>+12,.0f}  "
-              f"({bias / clean['mean_bank']:+.1%} of the clean score)")
+        clean_sel = selection_score(clean, sel_key)
+        pct = f"{bias / abs(clean_sel):+.1%}" if clean_sel else "n/a"
+        print(f"selection bias    : {bias:>+12,.0f}  ({pct} of the clean mean "
+              f"{unit}, which is what the champion was selected on)")
         print("\nQuote the clean number. The selection score is what the search")
         print("optimised toward and is biased upward by construction.")
     print(f"\n{best_path}")
