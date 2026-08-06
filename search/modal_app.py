@@ -204,6 +204,11 @@ def summarise_cells(rows, labels):
             label: {
                 "n": len(rs),
                 "mean_bank": statistics.mean([r["bank"] for r in rs]),
+                # What actually decides the match. Both banks rise together in
+                # a shared market, so a high bank against a strong opponent can
+                # still be a loss -- see search.league.worst_opponent.
+                "mean_margin": statistics.mean(
+                    [r["bank"] - r["opp_bank"] for r in rs]),
                 "min_bank": min(r["bank"] for r in rs),
                 "win_rate": statistics.mean(
                     [1 if r["bank"] > r["opp_bank"]

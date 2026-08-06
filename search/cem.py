@@ -1,7 +1,8 @@
 """Cross-entropy method over the agent's parameters.
 
-Keep a Gaussian over the 41 searchable scalars, sample a population, score each
-by mean final bank, refit the Gaussian to the top slice, repeat.
+Keep a Gaussian over the 45 searchable scalars, sample a population, score each
+against a fixed set of (opponent, seed, seat) cells, refit the Gaussian to the
+top slice, repeat.
 
 Why CEM and not RL: the objective is a ~40-dimensional scalar function we can
 evaluate exactly against the real engine in about a second. CEM needs ~10^4
@@ -277,12 +278,16 @@ def main():
             # wins and losses, so trading a matchup away for coins elsewhere
             # loses matches even as the mean rises. This is the gate's
             # fourth check, moved into the loop where it can still steer.
-            worst_label, worst_bank = worst_opponent(champion_stats)
+            worst_label, worst_margin = worst_opponent(champion_stats)
+            # Tolerance is absolute, scaled by the incumbent's magnitude. A
+            # multiplicative `best * (1 - tol)` is wrong for a signed quantity:
+            # at best_worst = -1,000 it sets the bar at -950, so a genuine
+            # improvement to -980 would be rejected for being "below" it.
             regressed = (best_worst is not None
-                         and worst_bank < best_worst * (1 - WORST_TOLERANCE))
+                         and worst_margin < best_worst - WORST_TOLERANCE * abs(best_worst))
             if champion_stats["mean_bank"] > best_holdout and not regressed:
                 best_holdout = champion_stats["mean_bank"]
-                best_worst = worst_bank if best_worst is None else max(best_worst, worst_bank)
+                best_worst = worst_margin if best_worst is None else max(best_worst, worst_margin)
                 best_vec = champion_vec
                 best_train = ranked[0][1]["mean_bank"]
                 unflatten(best_vec).to_json(best_path)
@@ -317,13 +322,13 @@ def main():
             for label, b in (champion_stats.get("by_opponent") or {}).items():
                 row[f"vs/{label}/mean_bank"] = b["mean_bank"]
                 row[f"vs/{label}/win_rate"] = b["win_rate"]
-            row["worst_opponent_bank"] = worst_bank
+            row["worst_opponent_margin"] = worst_margin
             run.log(row)
             print(f"gen {gen:>2}  train {train_best:>11,.0f}  "
                   f"holdout {champion_stats['mean_bank']:>11,.0f}  "
                   f"gap {row['generalisation_gap']:>10,.0f}  "
                   f"win {champion_stats['win_rate']:.0%}  "
-                  f"worst {worst_label} {worst_bank:>10,.0f}"
+                  f"worst {worst_label} {worst_margin:>+10,.0f}"
                   + ("  [rejected: worst regressed]" if regressed else ""))
 
         # One evaluation on seeds the search never saw. The difference against

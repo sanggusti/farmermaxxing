@@ -57,13 +57,44 @@ def test_a_constant_cell_contributes_nothing_rather_than_dividing_by_zero():
     assert fit[1] > fit[0]
 
 
-def test_worst_opponent_picks_the_lowest_mean():
+def test_worst_opponent_ranks_by_margin_not_bank_level():
+    """The v6 failure, as a unit test.
+
+    v6's bank against `v5-mixture` was 81,623 -- the second-highest number in
+    its per-opponent column -- while it lost 100% of those matches. In a shared
+    market both banks rise together, so a high bank against a strong opponent
+    can mean "we both did well and they did better".
+    """
+    stats = {"by_opponent": {
+        "starter": {"mean_bank": 130_000, "mean_margin": 95_000},
+        "v3-fixed": {"mean_bank": 75_000, "mean_margin": 12_000},
+        # Highest bank of the three losers, but the only actual loss.
+        "v5-mixture": {"mean_bank": 81_623, "mean_margin": -9_400},
+    }}
+    label, margin = worst_opponent(stats)
+    assert label == "v5-mixture"
+    assert margin == -9_400
+
+    # Ranking on bank alone would have picked the wrong opponent entirely.
+    by_bank = min(stats["by_opponent"],
+                  key=lambda k: stats["by_opponent"][k]["mean_bank"])
+    assert by_bank == "v3-fixed"
+
+
+def test_worst_opponent_falls_back_to_bank_when_margin_is_absent():
+    """An older scorer must degrade, not raise."""
     stats = {"by_opponent": {
         "starter": {"mean_bank": 140_000},
         "v3-fixed": {"mean_bank": 46_000},
-        "pass": {"mean_bank": 120_000},
     }}
     assert worst_opponent(stats) == ("v3-fixed", 46_000)
+
+
+def test_summarise_cells_reports_margin_per_opponent():
+    rows = [_row(100, 90), _row(300, 400), _row(50, 60), _row(70, 60)]
+    out = summarise_cells(rows, ["a", "a", "b", "b"])
+    assert out["by_opponent"]["a"]["mean_margin"] == -45     # (10 + -100) / 2
+    assert out["by_opponent"]["b"]["mean_margin"] == 0       # (-10 + 10) / 2
 
 
 def test_worst_opponent_is_absent_rather_than_wrong_without_a_breakdown():
