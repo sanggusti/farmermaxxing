@@ -315,6 +315,103 @@ Note this only clears the built-in `starter` and `pass` agents, which are a very
 low bar (`starter` farms a single carrot tile and never hires). It says the
 agent works, not that it is competitive.
 
+### 2026-08-06, v10: the late multiplier was dead code, and the pool was the wrong pool
+
+Started from the ladder rather than from the search. We sit at **rank 871 of
+2,260, rating 866.2**, and the shape of the field matters: the ratings are
+bimodal, ~1,300 teams below 1,000 and a long tail to 3,047. Small rating moves
+near 866 are worth many ranks (rank 850 is 880.4, rank 900 is 837.3).
+
+**Our banks are strongly anti-correlated with opponent strength.** Over the 46
+real episodes our two active submissions played:
+
+| opponent rating | n | our bank | their bank | win rate |
+|---|---|---|---|---|
+| < 750 | 13 | 102,773 | 64,893 | **100%** |
+| 750-850 | 12 | 99,314 | 71,395 | 75% |
+| 850-1000 | 15 | 93,806 | 100,240 | 27% |
+| 1000+ | 5 | 74,752 | 124,492 | 20% |
+
+Monotone, so not noise. Reading the replays: against a strong opponent milk goes
+160 -> 7 and melon 250 -> 31, and our realised milk price falls from $273 to $83.
+
+**The find.** The per-day census against a rank-49 opponent showed our land use
+falling to **31% at day 27 (52 of 75 tiles idle)** while they held 100% and
+rotated 42 strawberry into 38 wheat. The cause was mechanical: `mix_switch_day`
+was **28**, but wheat's own plant cutoff (`first_yield_day` 2 +
+`plant_cutoff_slack` 4) blocks planting after day **24**. The late-game
+multiplier fired four days after the only crop it could act on had stopped being
+plantable. It was dead code.
+
+Setting `mix_switch_day` 16 and the late wheat multiplier to 6 is v10:
+mean **+4,500 (11 sigma paired)**, worst seed 48,827 -> 54,012, land use
+61.3% -> 69.1%. Submitted.
+
+**Five refutations, all measured against the ladder tapes and the frozen pool:**
+
+1. *Shift melon to strawberry/wool.* The meta sells 308 strawberry and 212 wool
+   and we sell 131 and 0, and melon has the most brutal glut curve in the game
+   (`sq`/3.60). Cutting melon costs **-49,283 margin**; strawberry is already
+   pinned at its bound. Melon is our main earner and the probe was wrong.
+2. *We are labour-limited.* The meta fields 13-14 hands from day 15, we field 9,
+   and `hands_late` 12/15/18 all scored identically because `hire_turns` 1 caps
+   the farm at MAX_MARKET_ORDERS. Raising both together reaches 16 hands and
+   **loses 37k of margin** -- the hires crowd out the turn's SELL orders and the
+   fib cost compounds.
+3. *A separate cutoff for the 2-day crops holds the endgame land.* Implemented
+   `plant_cutoff_slack_fast`; worse on both pools at every value (**-1,001 to
+   -2,500 margin**). The idle tail really is correct. Reverted.
+4. *A CEM run warm-started on v10 improves it.* 14 generations x 160, ranked on
+   margin against tapes + frozen: nine of fourteen generations rejected, and the
+   winner fails the gate (floor 54,012 -> 46,757, win 30.2% -> 15.6%).
+5. *Higher-bank archetypes are a better hedge.* `target_wheat_tiles` 9 gains
+   11,500 of bank in a coordinate sweep and loses **-3.31 sigma of margin**;
+   wheat 5 loses -2.67 sigma. Bank and margin come apart exactly as in docs/5.
+
+**A better instrument: the band pool.** All three existing pools sit in the
+wrong place. Our frozen lineage banks 60-75k, the meta tapes bank ~190k, and the
+opponents Kaggle actually matches us with -- rated 840-1050 -- bank 100-123k.
+`sim.ladder clone` now holds six tapes cut from the opponent seats of six real
+episodes we played today, all verified non-degenerate on unseen seeds.
+
+**And two cautions about it.**
+
+*Sample size.* On 6 seeds x 1 seat the band pool said v11 beat v10 by +4,274
+margin and 42% vs 36% wins, which read as the gate mismeasuring. On 14 seeds x
+2 seats, paired, that collapses to **+394 at 0.20 sigma with wins 2.4%
+*worse***. The gate was right. A new instrument that immediately overturns an
+old verdict deserves the larger sample before it is believed.
+
+*Opponent overfitting.* A CEM run trained on four of the six band tapes (v12)
+looked like the best candidate of the day, at +3,812 margin and +9.5% wins
+overall. Split by opponent it is **+10,188 (3.96 sigma) on the four it trained
+against and -8,940 (-1.89 sigma) on the two held out**, and on the independent
+`real` pool it drops to 18.8% against v5 and 31.2% against v8. A four-opponent
+training pool is small enough to memorise. Hold opponents out, not just seeds.
+
+**Submitted, two of three slots:**
+
+| | agent | band pool wins | margin | worst | why |
+|---|---|---|---|---|---|
+| 1 | **v10** | **37.5%** | -3,215 | 53,042 | the champion; +4,138 at 13 sigma over v8 |
+| 2 | **v11** | 35.1% | -2,821 | 43,681 | diverse hedge, replaces v8 (25.6%, -14.15 sigma) |
+
+v11 is a statistical tie with v10 but a genuinely different basin -- 2 crops per
+turn, no late melon, premium sell floors raised (melon 0.49 -> 0.75) so it drips
+rather than dumps, rival-aware selling on. The second slot previously held v8,
+which the band pool puts 14 sigma behind v10, so the swap is a strict upgrade
+even though v11 does not beat the champion. Third slot deliberately unused: no
+remaining candidate measured better than v10 on any pool.
+
+**Where the gap actually is.** After v10 we bank ~88k against the meta tapes and
+they bank ~140k, and we win 0% of those. Every coordinate around v10 is at a
+local optimum -- the best single-parameter move in a 65-variant sweep was
++2,661, and two CEM runs from that basin produced nothing promotable. Parameter
+search on this policy looks exhausted. The remaining gap is structural: the meta
+holds 100% land use with 0 weeds from day 15 to day 27 on the same 75 tiles
+where we manage 69%, and closing that is an intra-day scheduling problem
+(#78, #30), not a tuning one.
+
 ### Next
 
 - CEM over the 41 searchable params, then re-gate on a held-out seed set.
