@@ -32,6 +32,35 @@ HOLDOUT_OFFSET = 10_000
 CLEAN_OFFSET = 20_000
 
 
+def paired_stderr(cand_banks, champ_banks):
+    """Standard error of the difference, using the pairing we already have.
+
+    The candidate and the champion are run on the IDENTICAL list of
+    (opponent, seed, seat) cells, so their per-cell banks are paired. The
+    unpaired formula `sqrt(se_a^2 + se_b^2)` throws that away, and here it
+    throws away most of the information: the opponent main effect is enormous
+    (roughly 128k against `starter` down to 59k against a frozen champion) and
+    identical for both agents, so it cancels exactly in a paired difference
+    while the unpaired formula counts it as noise twice.
+
+    Measured on a real gate run: 79.7% of the variance is between cells rather
+    than between agents, making the paired test 2.2x tighter.
+
+    Perverse consequence of the old formula, now fixed: adding an opponent to
+    the pool raised `combined_se` (more between-opponent spread) even though it
+    added information, so a broader and better evaluation looked statistically
+    weaker.
+
+    Returns None when the banks are not aligned, so the caller can fall back
+    rather than silently reporting a wrong number.
+    """
+    if (not cand_banks or not champ_banks
+            or len(cand_banks) != len(champ_banks) or len(cand_banks) < 2):
+        return None
+    diffs = [a - b for a, b in zip(cand_banks, champ_banks)]
+    return statistics.stdev(diffs) / len(diffs) ** 0.5
+
+
 def decide(cand, champ, by_opp, margin_sigmas=1.0, floor_tolerance=0.10):
     """The decision rule, as a pure function of summary statistics.
 
@@ -42,8 +71,12 @@ def decide(cand, champ, by_opp, margin_sigmas=1.0, floor_tolerance=0.10):
     Returns (checks, delta, combined_se) where checks is a list of
     (label, passed, detail).
     """
-    # Standard error of the difference between two independent means.
-    combined_se = (cand["stderr"] ** 2 + champ["stderr"] ** 2) ** 0.5
+    # Paired when the per-cell banks are available, which they are for any
+    # candidate and champion evaluated through `run_gate`. The unpaired form
+    # remains as a fallback for synthetic stats in tests.
+    combined_se = paired_stderr(cand.get("banks"), champ.get("banks"))
+    if combined_se is None:
+        combined_se = (cand["stderr"] ** 2 + champ["stderr"] ** 2) ** 0.5
     delta = cand["mean_bank"] - champ["mean_bank"]
     losing = [name for name, b in by_opp.items() if b["win_rate"] < 0.5]
 
@@ -75,6 +108,11 @@ def run_gate(candidate, champion, pool_spec, n_seeds, steps,
     champ_rows = evaluate(champion, opponents, seeds, steps, labels=labels,
                           metrics=True)
     cand, champ = summarise(cand_rows), summarise(champ_rows)
+    # Both were evaluated over the same opponents x seeds x seats in the same
+    # order, so these two lists are positionally paired. `decide` uses that to
+    # block out the between-cell variance, which is most of it.
+    cand["banks"] = [r["bank"] for r in cand_rows]
+    champ["banks"] = [r["bank"] for r in champ_rows]
     by_opp = per_opponent(cand_rows)
 
     checks, delta, combined_se = decide(

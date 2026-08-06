@@ -60,18 +60,45 @@ def sample(mean, std, rng):
     return {name: rng.gauss(mean[name], std[name]) for name in SEARCH_SPACE}
 
 
-def refit(elites, smoothing=0.3, floor=0.02):
+def refit(elites, smoothing=0.3, floor=0.02, int_floor=0.4):
     """Refit the Gaussian to the elite set.
 
     `floor` keeps a little exploration alive in every dimension so a parameter
     that collapses early can still recover in a later generation.
+
+    Two things here are not obvious, and both were silent bugs.
+
+    **Elite values are clipped into the box before fitting.** `sample()` draws
+    unbounded Gaussians and only `unflatten()` clips, so the stored elite
+    vectors hold raw out-of-range values. Fitting to those lets the mean of a
+    bound-optimal parameter march further outside the box every generation,
+    with nothing to pull it back. Simulated over 30 generations on a parameter
+    whose optimum sits at its lower bound, the fitted mean reached -124 against
+    a bound of 0 and 100% of draws clipped to the same value -- a population of
+    duplicates differing only by their noise draw, where any apparent
+    improvement is max-over-noise. The champion has 22 of 45 parameters sitting
+    on a bound, so this was affecting about half the search space.
+
+    **Integer dimensions get a floor in integer units.** A draw only matters
+    for an integer parameter if it changes the *rounded* value, and a floor
+    expressed as a fraction of the range does not guarantee that. At
+    `floor=0.02`, once the elites agreed the probability of ever changing
+    `fertilize_enabled` (range 0-1), `hire_turns` (1-4) or `liquidate_days`
+    (1-6) was 0.0000%, 0.0000% and 0.0001%. Three parameters were unsearchable,
+    and those frozen discrete switches are plausibly where the basins live --
+    which would explain why multi-restart works while in-run exploration does
+    not. `int_floor` is in raw units, so 0.4 gives roughly a one-in-five chance
+    of stepping to an adjacent integer.
     """
     mean, std = {}, {}
-    for name, (lo, hi, _) in SEARCH_SPACE.items():
-        vals = [e[name] for e in elites]
+    for name, (lo, hi, kind) in SEARCH_SPACE.items():
+        vals = [min(max(e[name], lo), hi) for e in elites]
         mean[name] = statistics.mean(vals)
         spread = statistics.stdev(vals) if len(vals) > 1 else 0.0
-        std[name] = max(spread, (hi - lo) * floor)
+        floor_abs = (hi - lo) * floor
+        if kind == "i":
+            floor_abs = max(floor_abs, int_floor)
+        std[name] = max(spread, floor_abs)
     return mean, std
 
 
