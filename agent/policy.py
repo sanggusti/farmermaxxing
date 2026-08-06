@@ -309,6 +309,45 @@ class Policy:
             return base
         return base * self.p.late_target_mult.get(kind, 1.0)
 
+    def _rival_supply(self, obs, lookahead, day=None):
+        """Units of each product the opponent is about to put on the market.
+
+        The opponent's whole farm is public and we have never looked at it. It
+        is the only shared object in the game -- two farms, one market -- and
+        the market coupling is worth up to 3x: the same agent banks 141,397
+        against `starter` and 46,454 against a strong opponent on identical
+        seeds. Every coin of that difference comes through prices.
+
+        Selling a stack the turn before a rival dumps the same product is the
+        difference between base price and something much closer to the floor,
+        and the information needed to do it is sitting in the observation.
+
+        Counts crops that will be harvestable within `lookahead` days, plus one
+        day's animal yield per animal. Deliberately crude: this is a signal for
+        ordering our own sales, not a forecast.
+        """
+        rival = obs["farms"][1 - obs["player"]]
+        day = obs["day"] if day is None else day
+        out = {}
+        for row in rival["tiles"]:
+            for tile in row:
+                if not isinstance(tile, dict):
+                    continue
+                if tile.get("kind") == "PLANT":
+                    crop = tile["crop"]
+                    # Crop tiles carry `planted_day`, NOT `age`. Reading a
+                    # missing `age` as 0 made every crop look freshly sown, so
+                    # no crop ever entered the lookahead window and this signal
+                    # silently reported animals only.
+                    age = day - tile.get("planted_day", day)
+                    ready_in = CROPS[crop]["first_yield_day"] - age
+                    if ready_in <= lookahead:
+                        out[crop] = out.get(crop, 0) + max(1, tile.get("yield_units", 1))
+                elif "animal" in tile:
+                    a = ANIMALS[tile["animal"]]
+                    out[a["product"]] = out.get(a["product"], 0) + 1
+        return out
+
     def _needs_structure(self, counts, day=0, scale=1):
         """Which structure to build next, if any."""
         if counts["GOOSE"] + counts["COOP"] < self._target("target_geese", day, scale):
@@ -536,7 +575,10 @@ class Policy:
             sellable = dict(shed)
             if n_animals:
                 sellable["WHEAT"] = max(0, sellable.get("WHEAT", 0) - need)
-            orders += plan_sales(sellable, market_inv, p, day, TOTAL_DAYS, room)
+            rival = (self._rival_supply(obs, p.rival_lookahead_days)
+                     if p.rival_supply_urgency else None)
+            orders += plan_sales(sellable, market_inv, p, day, TOTAL_DAYS, room,
+                                 rival_supply=rival)
 
         return orders[:MAX_MARKET_ORDERS]
 
