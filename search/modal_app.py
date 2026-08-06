@@ -41,13 +41,20 @@ def _run_episode(args):
     from sim.fastplay import fast_play
     from sim.harness import make_agent
 
-    vec, seed, seat, opponent, steps = args
+    # Tolerate the 5-tuple form: a container left warm from before `metrics`
+    # existed will still be handed work by a newer driver.
+    vec, seed, seat, opponent, steps = args[:5]
+    metrics = args[5] if len(args) > 5 else False
+
     me = make_agent(unflatten(vec))
     a, b = (me, opponent) if seat == 0 else (opponent, me)
-    r = fast_play(a, b, seed=seed, steps=steps)
-    return {"bank": r["banks"][seat],
-            "opp_bank": r["banks"][1 - seat],
-            "status": r["statuses"][seat]}
+    r = fast_play(a, b, seed=seed, steps=steps, metrics=metrics)
+    out = {"bank": r["banks"][seat],
+           "opp_bank": r["banks"][1 - seat],
+           "status": r["statuses"][seat]}
+    if "metrics" in r:
+        out.update(r["metrics"][seat])
+    return out
 
 
 # A CEM generation is two synchronisation barriers (score the population, then
@@ -127,21 +134,25 @@ def session():
         yield
 
 
-def score_population(vectors, seeds, opponent, steps, containers=100):
+def score_population(vectors, cells, steps, containers=100, metrics=False):
     """Score candidates on Modal. Requires an open `session()`.
 
-    Fans out at episode granularity, batched so each container gets enough work
-    to fill its worker pool, and reassembles per candidate locally so the
-    summary statistics are identical to `sim.arena.summarise`.
-    """
-    import statistics
+    `cells` is a list of (opponent, label, seed, seat), the SAME list for every
+    candidate, so results are directly comparable candidate to candidate
+    (common random numbers). Fans out at episode granularity, batched so each
+    container gets enough work to fill its worker pool, and reassembles per
+    candidate locally so the summary statistics match `sim.arena.summarise`.
 
+    `metrics` adds the land/action census (sim.census). Leave it off for the
+    per-generation population scoring, which is the hot path, and turn it on for
+    the elite and clean re-scoring, where the extra cost is negligible and the
+    numbers are the ones that get reported.
+    """
     args, owner = [], []
     for i, v in enumerate(vectors):
-        for seed in seeds:
-            for seat in (0, 1):
-                args.append((v, seed, seat, opponent, steps))
-                owner.append(i)
+        for opp, _label, seed, seat in cells:
+            args.append((v, seed, seat, opp, steps, metrics))
+            owner.append(i)
 
     # One batch per container, rounded up, so every container gets a share and
     # none sits idle waiting on a straggler batch.
@@ -156,22 +167,66 @@ def score_population(vectors, seeds, opponent, steps, containers=100):
     for idx, r in zip(owner, flat):
         results[idx].append(r)
 
-    out = []
-    for rows in results:
-        banks = [r["bank"] for r in rows]
-        wins = [1 if r["bank"] > r["opp_bank"]
-                else (0 if r["bank"] < r["opp_bank"] else 0.5) for r in rows]
-        out.append({
-            "n": len(rows),
-            "mean_bank": statistics.mean(banks),
-            "median_bank": statistics.median(banks),
-            "min_bank": min(banks),
-            "stderr": (statistics.stdev(banks) / len(banks) ** 0.5
-                       if len(banks) > 1 else 0.0),
-            "win_rate": statistics.mean(wins),
-            "errors": sum(1 for r in rows if r["status"] != "DONE"),
-        })
+    labels = [c[1] for c in cells]
+    return [summarise_cells(rows, labels) for rows in results]
+
+
+def summarise_cells(rows, labels):
+    """Per-candidate summary. `rows` and `labels` are aligned to the cell list.
+
+    Defined here rather than imported from sim.arena because the driver runs
+    outside the Modal image; sim.arena.summarise is the same arithmetic and
+    tests/test_gate.py pins the two together.
+    """
+    import statistics
+
+    banks = [r["bank"] for r in rows]
+    wins = [1 if r["bank"] > r["opp_bank"]
+            else (0 if r["bank"] < r["opp_bank"] else 0.5) for r in rows]
+
+    by_opp = {}
+    for label, r in zip(labels, rows):
+        by_opp.setdefault(label, []).append(r)
+
+    out = {
+        "n": len(rows),
+        "mean_bank": statistics.mean(banks),
+        "median_bank": statistics.median(banks),
+        "min_bank": min(banks),
+        "stderr": (statistics.stdev(banks) / len(banks) ** 0.5
+                   if len(banks) > 1 else 0.0),
+        "win_rate": statistics.mean(wins),
+        "errors": sum(1 for r in rows if r["status"] != "DONE"),
+        # Positional, aligned to `cells`, so the caller can standardise each
+        # cell across the population before ranking.
+        "banks": banks,
+        "by_opponent": {
+            label: {
+                "n": len(rs),
+                "mean_bank": statistics.mean([r["bank"] for r in rs]),
+                "min_bank": min(r["bank"] for r in rs),
+                "win_rate": statistics.mean(
+                    [1 if r["bank"] > r["opp_bank"]
+                     else (0 if r["bank"] < r["opp_bank"] else 0.5) for r in rs]),
+            }
+            for label, rs in by_opp.items()
+        },
+    }
+    for key in _CENSUS_KEYS:
+        vals = [r[key] for r in rows if key in r]
+        if len(vals) == len(rows) and vals:
+            out[f"mean_{key}"] = statistics.mean(vals)
     return out
+
+
+# Kept in sync with sim.arena.CENSUS_KEYS by tests/test_census.py; duplicated
+# because this module must import cleanly without the sim package present.
+_CENSUS_KEYS = (
+    "productive_tile_day_frac", "weed_tile_day_frac",
+    "idle_structure_tile_day_frac", "mean_unlocked_tiles", "max_quadrants",
+    "plant_actions_per_day", "products_sold_distinct", "sell_units_total",
+    "end_shed_units",
+)
 
 
 @app.local_entrypoint()
