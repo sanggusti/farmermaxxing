@@ -1,4 +1,5 @@
 {
+  "_notes": "CEM ranked on margin vs mixture pool; 100% win vs all 8 frozen opponents, floor 52,764 vs v5's 33,768; gate passed 3 of 4, mean statistically tied (-384 vs 1 sigma 1,652)",
   "animal_cash_reserve": 274.38684094884485,
   "crop_price_elasticity": 0.5654807918900596,
   "distance_penalty": 13.915671930993541,
@@ -23,6 +24,7 @@
   },
   "liquidate_days": 2,
   "mix_switch_day": 28,
+  "plant_crops_per_turn": 1,
   "plant_cutoff_slack": 4,
   "prio_build": 36.188066505774884,
   "prio_care": 23.118243997629648,
@@ -35,6 +37,9 @@
   "prio_place_animal": 70.42087544222278,
   "prio_plant": 20.784818222165214,
   "prio_water": 25.429753101644206,
+  "rival_lookahead_days": 2,
+  "rival_supply_ref": 20.0,
+  "rival_supply_urgency": 0.0,
   "seed_batch": 4,
   "sell_floor_frac": {
     "CARROT": 1.2372637906410942,
