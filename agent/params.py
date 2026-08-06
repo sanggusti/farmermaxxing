@@ -198,7 +198,14 @@ SEARCH_SPACE = {
     "hire_turns":             (1, 4, "i"),
 
     "land_buy_reserve":       (0, 6000, "f"),
-    "land_buy_empty_max":     (0, 25, "i"),
+    # Upper bound is 100, not 25, because the gate is `empty <=
+    # land_buy_empty_max` and a fresh farm has exactly 25 empty tiles. At a
+    # bound of 25 the day-0 land purchase the ladder meta makes is reachable
+    # only at the single exact value 25 -- one point in the whole range, which
+    # a Gaussian will essentially never sit on. 100 is above any reachable
+    # empty count, so "expand regardless of how empty we are" becomes an
+    # ordinary region of the space rather than a knife edge.
+    "land_buy_empty_max":     (0, 100, "i"),
 
     "target_geese":           (0, 22, "i"),
     "target_cows":            (0, 12, "i"),
