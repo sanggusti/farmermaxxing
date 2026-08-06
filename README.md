@@ -27,3 +27,4 @@ Technical reports, one per milestone:
 | [3. Market starvation](docs/3_market_starvation.md) | a refuted hypothesis, and the constraint it uncovered |
 | [4. Scaling and conclusions](docs/4_scaling_and_conclusions.md) | 40x search throughput, multi-restart sweep, where things stand |
 | [5. Reading the ladder](docs/5_reading_the_ladder.md) | replays reproduce exactly, the meta's build, four refutations, three bugs in our own instruments |
+| [6. A dead parameter, and a better pool](docs/6_a_dead_parameter_and_a_better_pool.md) | the late rotation never ran, six refutations, and an opponent pool cut from our own matchmaking band |

@@ -1,4 +1,5 @@
 {
+  "_notes": "late wheat rotation: mix_switch_day 28->16 so late_target_mult acts before wheat's own plant cutoff; +4,500 mean, land use 61.3%->69.1%",
   "animal_cash_reserve": 274.38684094884485,
   "crop_price_elasticity": 0.5654807918900596,
   "distance_penalty": 13.915671930993541,
