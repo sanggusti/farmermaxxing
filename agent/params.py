@@ -62,6 +62,14 @@ class Params:
     # Stop planting slow crops once they cannot mature before the season ends.
     plant_cutoff_slack: int = 1
 
+    # How many DIFFERENT crops may be planted in one turn. The engine validates
+    # planting atomically per crop, so a mix is legal provided each crop stays
+    # within its own seed count; the old single-crop rule was stricter than the
+    # engine requires. It cost the early game: the top of the ladder holds 11
+    # wheat and 8 melon by day 3 at 92% land use, against our 56%. At 1 the
+    # behaviour is identical to before.
+    plant_crops_per_turn: int = 1
+
     # --- season stages -------------------------------------------------------
     # Targets used to be static for all 30 days. Measured on the champion, land
     # utilisation peaks at 76% on day 19 and falls to 24% by day 29 -- 57 of 75
@@ -186,6 +194,14 @@ SEARCH_SPACE = {
     "animal_cash_reserve":    (0, 4000, "f"),
     "seed_batch":             (2, 28, "i"),
     "plant_cutoff_slack":     (0, 8, "i"),
+    # Measured WORSE in isolation on the v5 portfolio -- against `starter`,
+    # `v3-fixed` and v5 alike -- so it is not a free win. But that probe held
+    # every other parameter fixed, and v5 has only two crops with a non-zero
+    # target, so there was rarely a second crop worth planting. Whether a mix
+    # pays depends on the portfolio it is planting, which is exactly the kind
+    # of correlated question a single-parameter probe cannot answer. Left
+    # searchable and inert at 1.
+    "plant_crops_per_turn":   (1, 4, "i"),
 
     # Season-stage mix. Defaults (switch at 30, all multipliers 1.0, elasticity
     # 0.0) reproduce the previous behaviour exactly, so a warm start begins at

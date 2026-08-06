@@ -124,15 +124,22 @@ class Policy:
         seeds = private.get("seeds", {})
 
         scale = len(me["unlocked_quadrants"])
-        want = self._wanted_crop(counts, crops, day, scale, prices)
 
         # Never queue more PLANT tasks than we hold seeds. The engine validates
-        # planting atomically per crop:
+        # planting atomically PER CROP:
         #     blocked = {crop for crop, n in demand.items() if n > seeds[crop]}
         # so if 7 units all try to plant wheat while we hold 2 seeds, ALL seven
         # are silently dropped and the farm deadlocks -- forever, since nothing
         # about the state changes to break the tie.
-        plant_budget = seeds.get(want, 0) if want else 0
+        #
+        # Note what that validation is keyed on: the crop. Planting two
+        # different crops in one turn is legal as long as each stays within its
+        # own seed count. The single-crop-per-turn rule was a stricter reading
+        # than the engine requires, and it costs real ground -- the top of the
+        # ladder holds 11 wheat and 8 melon by day 3 while we manage 10 tiles
+        # total, and that deficit compounds for the rest of the season.
+        wanted = self._wanted_crops(counts, crops, day, scale, prices)
+        plant_budget = {c: seeds.get(c, 0) for c in wanted}
         # Fertilizer above the reserve is available for field use; the rest
         # stays earmarked for sale.
         carried = self._carried(private)
@@ -146,9 +153,11 @@ class Policy:
                     continue
 
                 if tile is None:
-                    if plant_budget > 0:
-                        tasks.append(Task(p.prio_plant, pos, ["PLANT", want], f"plant-{want}"))
-                        plant_budget -= 1
+                    crop = next((c for c in wanted if plant_budget[c] > 0), None)
+                    if crop:
+                        tasks.append(Task(p.prio_plant, pos, ["PLANT", crop],
+                                          f"plant-{crop}"))
+                        plant_budget[crop] -= 1
                     elif self._needs_structure(counts, day, scale):
                         kind = self._needs_structure(counts, day, scale)
                         tasks.append(Task(p.prio_build, pos, [f"BUILD_{kind}"], f"build-{kind}"))
@@ -310,6 +319,54 @@ class Policy:
             return "PASTURE"
         return None
 
+    def _wanted_crops(self, counts, crops, day, scale=1, prices=None):
+        """Crops a free tile may get this turn, best first.
+
+        At `plant_crops_per_turn = 1` this is exactly `[_wanted_crop(...)]`, so
+        the default behaviour is unchanged and a warm start begins where the
+        previous champion left off.
+
+        Above 1 the farm can plant a mix in a single turn. The engine allows it
+        -- its atomic validation is keyed per crop -- and the single-crop rule
+        was costing the early game: while we plant one crop at a time, the top
+        of the ladder is holding 11 wheat and 8 melon by day 3 and running 92%
+        land use against our 56%.
+        """
+        n = max(1, int(self.p.plant_crops_per_turn))
+        if n == 1:
+            first = self._wanted_crop(counts, crops, day, scale, prices)
+            return [first] if first else []
+
+        # Same ranking as _wanted_crop, kept as a list rather than an argmax.
+        ranked = self._crop_scores(counts, crops, day, scale, prices)
+        return [crop for _score, crop in ranked[:n]]
+
+    def _crop_scores(self, counts, crops, day, scale=1, prices=None):
+        """[(score, crop)] for every plantable crop, best first."""
+        p = self.p
+        days_left = TOTAL_DAYS - day
+        out = []
+        for crop, attr in (("WHEAT", "target_wheat_tiles"),
+                           ("MELON", "target_melon_tiles"),
+                           ("CARROT", "target_carrot_tiles"),
+                           ("TOMATO", "target_tomato_tiles"),
+                           ("STRAWBERRY", "target_strawberry_tiles")):
+            want = self._target(attr, day, scale)
+            if want <= 0 or crops[crop] >= want:
+                continue
+            if CROPS[crop]["first_yield_day"] + p.plant_cutoff_slack > days_left:
+                continue
+            score = (want - crops[crop]) / want
+            if prices and p.crop_price_elasticity:
+                base_price = MARKET_PARAMS[crop]["base"]
+                now = prices.get(crop)
+                if now and base_price:
+                    score *= (now / base_price) ** p.crop_price_elasticity
+            if score > 0:
+                out.append((score, crop))
+        out.sort(key=lambda sc: -sc[0])
+        return out
+
     def _wanted_crop(self, counts, crops, day, scale=1, prices=None):
         """Which crop a free tile should get, or None.
 
@@ -326,39 +383,10 @@ class Policy:
         Targets are per-quadrant and scale with owned land, so a bought quadrant
         fills up instead of lying fallow.
         """
-        p = self.p
-        days_left = TOTAL_DAYS - day
-        targets = [
-            ("WHEAT", "target_wheat_tiles"),
-            ("MELON", "target_melon_tiles"),
-            ("CARROT", "target_carrot_tiles"),
-            ("TOMATO", "target_tomato_tiles"),
-            ("STRAWBERRY", "target_strawberry_tiles"),
-        ]
-
-        best, best_score = None, 0.0
-        for crop, attr in targets:
-            want = self._target(attr, day, scale)
-            if want <= 0 or crops[crop] >= want:
-                continue
-            # Don't plant what cannot mature before the season ends.
-            if CROPS[crop]["first_yield_day"] + p.plant_cutoff_slack > days_left:
-                continue
-            score = (want - crops[crop]) / want
-            # Weight the shortfall by how well the crop is currently paying.
-            # Seven of nine products end the season ABOVE base with market
-            # inventory below I0 -- the town drains faster than two players
-            # supply -- and the only two we push to a discount are the two we
-            # concentrate on. At elasticity 0 this is x**0 == 1, so the default
-            # is byte-identical to ranking on shortfall alone.
-            if prices and p.crop_price_elasticity:
-                base_price = MARKET_PARAMS[crop]["base"]
-                now = prices.get(crop)
-                if now and base_price:
-                    score *= (now / base_price) ** p.crop_price_elasticity
-            if score > best_score:
-                best, best_score = crop, score
-        return best
+        # One definition of the ranking, used by both the single-crop and
+        # multi-crop paths, so the two cannot drift apart.
+        ranked = self._crop_scores(counts, crops, day, scale, prices)
+        return ranked[0][1] if ranked else None
 
     # ------------------------------------------------------------ assignment
     def _assign(self, units, tasks, board):
@@ -472,16 +500,21 @@ class Policy:
 
         # 4. Seeds. Buy enough to keep every idle unit planting -- seeds are the
         # cheapest thing on the board and running dry stalls the whole farm.
-        want = self._wanted_crop(counts, crops, day, scale,
-                                 obs["market"]["prices"])
-        if want:
-            held = seeds.get(want, 0)
+        # Stocked per crop we intend to plant, in the same priority order the
+        # planner uses. Buying only for the single best crop is what made the
+        # multi-crop budget above unreachable: the tasks existed but the seeds
+        # for the second crop never did.
+        for crop in self._wanted_crops(counts, crops, day, scale,
+                                       obs["market"]["prices"]):
+            if len(orders) >= MAX_MARKET_ORDERS:
+                break
+            held = seeds.get(crop, 0)
             need_seeds = min(counts["empty"], p.seed_batch) - held
-            unit_cost = CROPS[want]["seed"]
+            unit_cost = CROPS[crop]["seed"]
             affordable = int(max(0, money - p.animal_cash_reserve) // unit_cost)
             n = min(need_seeds, affordable)
             if n > 0:
-                orders.append(["BUY_SEED", want, n])
+                orders.append(["BUY_SEED", crop, n])
                 money -= unit_cost * n
 
         # 5. Wheat to feed animals. Counts livestock we merely *own* (including
