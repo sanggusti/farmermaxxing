@@ -11,28 +11,8 @@ import argparse
 from collections import Counter
 
 from sim.harness import play, make_agent
+from sim.census import TURNS_PER_DAY, tile_stats, tile_summary, utilisation
 from params import Params
-
-TURNS_PER_DAY = 24
-
-
-def tile_summary(tiles):
-    c = Counter()
-    for row in tiles:
-        for t in row:
-            if t is None:
-                c["empty"] += 1
-            elif t == "LOCKED":
-                c["locked"] += 1
-            elif t.get("kind") == "PLANT":
-                c[t["crop"][:4].lower()] += 1
-            elif t.get("kind") == "WEED":
-                c["weed"] += 1
-            elif "animal" in t:
-                c[t["animal"][:4].lower()] += 1
-            else:
-                c[t["kind"][:4].lower()] += 1
-    return c
 
 
 def fmt(counter, keys=None):
@@ -57,8 +37,10 @@ def main():
     steps = result["env"].steps
     p = args.player
 
-    print(f"{'day':>3} {'cash':>8} {'hands':>5}  {'tiles':<44} {'shed':<34} prices")
-    print("-" * 130)
+    print(f"{'day':>3} {'cash':>8} {'hands':>5} {'unlk':>4} {'use':>4}  "
+          f"{'tiles':<44} {'shed':<34} prices")
+    print("-" * 143)
+    util_days, unlocked_days = 0, 0
     for i in range(0, len(steps), TURNS_PER_DAY):
         s = steps[i]
         obs0 = s[0].observation
@@ -67,15 +49,22 @@ def main():
         day = obs0["day"]
         prices = obs0["market"]["prices"]
         shown = {k: prices[k] for k in ("WHEAT", "EGG", "MELON", "FERTILIZER") if k in prices}
+        st = tile_stats(farm)
+        util_days += st["planted"] + st["animals"]
+        unlocked_days += st["unlocked"]
         print(
-            f"{day:>3} {farm['money']:>8,.0f} {len(farm['hands']):>5}  "
+            f"{day:>3} {farm['money']:>8,.0f} {len(farm['hands']):>5} "
+            f"{st['unlocked']:>4} {utilisation(farm):>4.0%}  "
             f"{fmt(tile_summary(farm['tiles'])):<44} "
             f"{fmt(Counter(private['shed'])):<34} "
             + " ".join(f"{k[:4].lower()}={v}" for k, v in shown.items())
         )
 
-    print("-" * 130)
+    print("-" * 143)
     print(f"final banks: {result['banks']}  seeds left: {dict(steps[-1][p].observation['private']['seeds'])}")
+    # Season-average land use. Bank alone cannot tell "earned more per tile"
+    # apart from "used more tiles"; this is the number that separates them.
+    print(f"land in use: {util_days / unlocked_days:.1%} of unlocked tile-days")
 
 
 if __name__ == "__main__":

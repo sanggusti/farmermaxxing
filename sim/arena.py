@@ -27,7 +27,7 @@ from obs import wandb_setup
 
 
 def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None,
-             fast=True):
+             fast=True, metrics=False):
     """Play params against each opponent across seeds, from both seats.
 
     `fast` uses sim.fastplay, which skips kaggle_environments' replay
@@ -48,8 +48,10 @@ def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None,
             for seat in (0, 1):
                 me = make_agent(params)
                 a, b = (me, opp) if seat == 0 else (opp, me)
-                runner = fast_play if fast else play
-                r = runner(a, b, seed=seed, steps=steps)
+                if fast:
+                    r = fast_play(a, b, seed=seed, steps=steps, metrics=metrics)
+                else:
+                    r = play(a, b, seed=seed, steps=steps)
 
                 my_bank = r["banks"][seat]
                 their_bank = r["banks"][1 - seat]
@@ -62,6 +64,10 @@ def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None,
                     "win": 1 if my_bank > their_bank else (0 if my_bank < their_bank else 0.5),
                     "status": r["statuses"][seat],
                 }
+                # Land/action census for OUR seat only. Merged flat so
+                # summarise() can average them without knowing the names.
+                if "metrics" in r:
+                    row.update(r["metrics"][seat])
                 rows.append(row)
                 if on_episode:
                     on_episode(row)
@@ -87,11 +93,78 @@ def per_opponent(rows):
     }
 
 
+# Census keys carried through evaluate() and averaged by summarise(). Listed
+# explicitly rather than inferred from the rows so a partially-populated batch
+# (an old Modal container returning rows without them) degrades to a missing
+# key instead of a silently wrong average over the subset that has it.
+CENSUS_KEYS = (
+    "productive_tile_day_frac",
+    "weed_tile_day_frac",
+    "idle_structure_tile_day_frac",
+    "mean_unlocked_tiles",
+    "max_quadrants",
+    "plant_actions_per_day",
+    "products_sold_distinct",
+    "sell_units_total",
+    "end_shed_units",
+)
+
+# Not averaged -- a mean of hashes is meaningless. Carried per-row so an
+# analysis can ask whether a bank advantage tracks the shop order, which would
+# make it an RNG artefact rather than a strategy. See sim.census.record_town.
+CONFOUND_KEYS = ("shop_order_hash",)
+
+
+def shop_order_confound(rows):
+    """How much of the bank spread is explained by which shop unlocked first.
+
+    The engine picks the daily shop unlock from the same RNG stream that spawns
+    weeds, and weeds draw once per empty unlocked tile across BOTH farms. So an
+    agent that changes how it fills land changes its own shop order, and with it
+    which products the town drains all season.
+
+    That is a confound, not a strategy: on the ladder the opponent's land-fill
+    profile is different, so a favourable unlock found on fixed seeds does not
+    travel.
+
+    Grouped on the FIRST shop only (8 possible values). Grouping on the whole
+    order produces near-unique groups, and a variance ratio over singleton
+    groups is ~1 no matter what the data says.
+
+    Returns omega squared -- the between-group share of variance with the bias
+    from having several groups removed, so it is comparable across runs with
+    different group counts. Clamped at 0; negative means the grouping explains
+    less than chance. `min_group` is reported because omega squared is only
+    worth reading when the groups have several episodes each.
+    """
+    groups = {}
+    for r in rows:
+        if "shop_first" not in r:
+            return None
+        groups.setdefault(r["shop_first"], []).append(r["bank"])
+    banks = [b for g in groups.values() for b in g]
+    n, k = len(banks), len(groups)
+    out = {"n": n, "n_groups": k,
+           "min_group": min((len(g) for g in groups.values()), default=0)}
+    if n < 3 or k < 2 or k >= n:
+        return {**out, "omega_sq": 0.0}
+
+    grand = statistics.mean(banks)
+    ss_total = sum((b - grand) ** 2 for b in banks)
+    ss_between = sum(len(g) * (statistics.mean(g) - grand) ** 2
+                     for g in groups.values())
+    if ss_total <= 0:
+        return {**out, "omega_sq": 0.0}
+    ms_within = (ss_total - ss_between) / (n - k)
+    omega = (ss_between - (k - 1) * ms_within) / (ss_total + ms_within)
+    return {**out, "omega_sq": max(0.0, omega)}
+
+
 def summarise(rows):
     banks = [r["bank"] for r in rows]
     wins = [r["win"] for r in rows]
     errors = sum(1 for r in rows if r["status"] != "DONE")
-    return {
+    out = {
         "n": len(rows),
         "mean_bank": statistics.mean(banks),
         "median_bank": statistics.median(banks),
@@ -100,6 +173,11 @@ def summarise(rows):
         "win_rate": statistics.mean(wins),
         "errors": errors,
     }
+    for key in CENSUS_KEYS:
+        vals = [r[key] for r in rows if key in r]
+        if len(vals) == len(rows) and vals:
+            out[f"mean_{key}"] = statistics.mean(vals)
+    return out
 
 
 def main():
@@ -134,7 +212,7 @@ def main():
                                   "opp_bank", "win", "status")])
 
         rows = evaluate(params, opponents, seeds, args.steps,
-                        on_episode=record, labels=labels)
+                        on_episode=record, labels=labels, metrics=True)
         stats = summarise(rows)
 
         breakdown = per_opponent(rows)
@@ -152,6 +230,14 @@ def main():
     print(f"median bank : {stats['median_bank']:>12,.0f}")
     print(f"worst bank  : {stats['min_bank']:>12,.0f}")
     print(f"win rate    : {stats['win_rate']:>12.1%}")
+    if "mean_productive_tile_day_frac" in stats:
+        print(f"land in use : {stats['mean_productive_tile_day_frac']:>12.1%}"
+              f"   (weeds {stats['mean_weed_tile_day_frac']:.1%},"
+              f" idle structures {stats['mean_idle_structure_tile_day_frac']:.1%})")
+        print(f"quadrants   : {stats['mean_max_quadrants']:>12.2f}"
+              f"   plants/day {stats['mean_plant_actions_per_day']:.1f}")
+        print(f"products    : {stats['mean_products_sold_distinct']:>12.1f} of 9"
+              f"   unsold at end {stats['mean_end_shed_units']:.0f}")
     print("per opponent:")
     for name, b in sorted(breakdown.items()):
         print(f"  {name:<22} bank {b['mean_bank']:>11,.0f}   win {b['win_rate']:>6.1%}   n={b['n']}")
