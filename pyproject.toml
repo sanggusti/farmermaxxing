@@ -17,5 +17,12 @@ dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: longer-running checks (timing, full episodes)"]
-addopts = "-m 'not slow'"
+markers = [
+    "slow: longer-running checks (timing, full episodes)",
+    # Validate the BUILT submission.tar.gz. Separate from `slow` because these
+    # must run AFTER the tar, and `make bundle` depends on `make check` -- so
+    # including them in `check` makes the tarball tests fail on a stale archive
+    # and block the very command that would refresh it.
+    "bundle: assertions about the built submission.tar.gz",
+]
+addopts = "-m 'not slow and not bundle'"

@@ -107,10 +107,10 @@ verified by `tests/test_parity.py`.
 | `actTimeout` | **1 s/turn** (plus a 60 s bank for the whole episode) |
 | `runTimeout` | 1200 s per episode |
 | Submission box | 2 vCPU, ~12 GiB RAM |
-| Our own ceiling | p99 turn < 300 ms, enforced by `tests/test_contract.py` |
+| Our own ceiling | p99 turn < 50 ms, enforced by `tests/test_contract.py` |
 
-The field currently uses ~0.005 ms of that 1 s budget. Per-turn forward
-simulation is wide-open ground (§7, milestone 6).
+The field uses ~0.005 ms of that 1 s budget and we use ~0.25 ms, i.e. 0.03%.
+Per-turn forward simulation is wide-open ground (issue #10).
 
 ---
 
@@ -142,23 +142,38 @@ So: heuristic policy → CEM parameter search → per-turn forward-sim planner.
 agent/            the submission (flat imports, Kaggle unpacks it flat)
   main.py         entry point; `agent` defined LAST; dir discovery that survives exec()
   policy.py       the brain: tasks -> greedy unit assignment -> market orders
-  params.py       Params dataclass + SEARCH_SPACE (41 tunable scalars)
+  params.py       Params dataclass (46 fields) + SEARCH_SPACE (60 dims: 36 float, 24 int)
   market.py       price-curve port + sell scheduling
   rules.py        constants mirrored from engine source
   params.json     tuned params, written by CEM (absent = use defaults)
 
 sim/              local evaluation
   harness.py      one definition of "play an episode"
+  fastplay.py     the same episode without replay bookkeeping (3.3x), for search
   run.py          single episode + replay dump
   trace.py        per-day X-ray, the main debugging view
   arena.py        holdout matrix, both seats, W&B logging
+  census.py       land accounting + per-product sales mix
+  gate.py         the promotion gate; reads the CHAMPION file, defaults to POOL=top
+  opponents.py    the pool: builtins, frozen snapshots, band/top tapes
+  tape.py         a recorded ladder seat, replayable as an opponent
+  ladder.py       read the ladder: verify / census / fetch / clone / sync /
+                  calibrate / mine
+  ledger.py       every submission, its local claim, and what the ladder said
+  mix.py          our REALISED tile mix beside a ladder opponent's, per day
 
 search/
   cem.py          cross-entropy method over Params
+  archetypes.py   constructed restart portfolios, incl. `metabuild` from a replay
   modal_app.py    fan-out on Modal
 
 obs/wandb_setup.py  one place that decides how we talk to W&B
-tests/              engine parity + submission contract + timing
+tests/              validity only: parity, contract, tarball, seats, crash-safety,
+                    timing, and the search's own statistics. NO score assertions.
+
+CHAMPION            the snapshot a candidate must beat (moves on a ladder rating)
+ledger.json         the durable submission record
+AGENTS.md           the operating contract; CLAUDE.md just imports it
 ```
 
 ### The policy is deliberately stateless
@@ -266,8 +281,12 @@ Everything logs to W&B project `farmermaxxing`, via `obs/wandb_setup.py`:
   `wandb.Table` (opponent, seed, seat, bank, opp_bank, win, status) and summary
   metrics `mean_bank` / `median_bank` / `min_bank` / `stderr` / `win_rate` / `errors`.
 - `job_type="cem"`, one run per search, logging per generation:
-  `best_bank`, `elite_mean_bank`, `pop_mean_bank`, `best_overall`. The winning
-  `params.json` is attached as a versioned artifact.
+  `train_best_bank`, `train_elite_mean_bank`, `train_pop_mean_bank`,
+  `holdout_best_bank`, `holdout_win_rate`, `generalisation_gap`,
+  `best_holdout_overall`, `worst_opponent_margin`, and `vs/<label>/*` per
+  reference opponent. Run summary adds `clean_bank`, `clean_selection_score`,
+  `selection_bias` and `heldout_opponents`. The winning `params.json` is
+  attached as a versioned artifact.
 - Runs are grouped (`--group`) so a search and its evaluations line up.
 - `WANDB_MODE=disabled` turns it all off; tests set this automatically.
 - Container defaults (`WANDB_CACHE_DIR=/tmp`, `WANDB_DISABLE_GIT`,
@@ -347,6 +366,14 @@ Setting `mix_switch_day` 16 and the late wheat multiplier to 6 is v10:
 mean **+4,500 (11 sigma paired)**, worst seed 48,827 -> 54,012, land use
 61.3% -> 69.1%. Submitted.
 
+> **Reconciled 2026-08-17: docs/6 is the correct record and this paragraph is
+> not.** Re-run on `--opponents real` over 8 clean seeds and both seats, now
+> that the pool actually contains the champion, the delta is **+4,133** against
+> docs/6's +4,138, with the worst seed **45,519 -> 50,195** matching docs/6's
+> table exactly and land use 61.0% -> 69.0% matching its 61.3% -> 69.1%. The
+> figures quoted above -- 48,827 -> 54,012 at 11 sigma -- reproduce on no pool
+> and should be read as a transcription error.
+
 **Five refutations, all measured against the ladder tapes and the frozen pool:**
 
 1. *Shift melon to strawberry/wool.* The meta sells 308 strawberry and 212 wool
@@ -412,11 +439,191 @@ holds 100% land use with 0 weeds from day 15 to day 27 on the same 75 tiles
 where we manage 69%, and closing that is an intra-day scheduling problem
 (#78, #30), not a tuning one.
 
+### 2026-08-17, what the ladder said, eleven days later
+
+Nothing was submitted between 2026-08-06 and this entry: **eleven idle days, or
+about 55 unused submissions.** The gap matters because the ladder is the only
+ground truth we have, and it was free.
+
+**The v10 promotion cost 108 rating points.**
+
+| version | submission | local claim | pool it was measured on | ladder |
+|---|---|---|---|---|
+| v2 | 55255699 | 83,586 holdout bank | `starter` | 667.6 |
+| v3 | 55257006 | 109,606 clean bank | `starter` | **645.3** |
+| v4 | 55261512 | 137,686 clean bank | `starter` | 774.7 |
+| v5 | 55287313 | 90,842 clean bank | mixture | 832.3 |
+| v8 | 55290443 | worst seed 52,764, 100% vs frozen | `frozen` | **853.9** |
+| v10 | 55294423 | **+4,138 at 13 sigma** | `real` | **746.1** |
+| v11 | 55294870 | -2,821 margin, 35.1% wins | `band` | 730.2 |
+
+The rank that follows from the two currently-scored slots is **2455 of 4883**, at
+a score of 746.1 against a median of 749 and a top-ten cutoff of ~2963. Every one
+of these numbers had to be recovered by re-querying Kaggle, which is why
+`ledger.json` and `sim/ledger.py` now exist.
+
+**The obvious reading of that table is wrong, and the correct one is worse.**
+The obvious reading is "the local gate lied about v10". It did not. Re-run on a
+`resolve_pool` that is what it claims to be, v10 beats v8 uniformly:
+
+| pool | v10 mean | v8 mean | v10 win | v8 win | v10 beats v8 on margin |
+|---|---|---|---|---|---|
+| `top`, 4 clean seeds | 87,625 | 81,726 | **0.0%** | **0.0%** | all 4 opponents |
+| `band`, 6 clean seeds | 90,260 | 86,244 | 36.1% | 29.2% | all 6 opponents |
+
+Bank, floor, win rate, and per-opponent margin all favour v10, on both pools,
+without exception. The ladder column that says otherwise is **confounded by
+convergence time**: a submission restarts at 600 and climbs, and v8 held a slot
+for 2h45m — perhaps fifteen episodes, still rising — while v10 has had eleven
+days to settle. Comparing a partially-climbed rating against a converged one is
+the error. v8's 853.9 is an artifact until it is re-submitted and left alone,
+which costs one slot and 36 hours and is worth doing precisely because this
+belief would otherwise misdirect every comparison downstream of it.
+
+So the honest lesson is not "distrust the gate". It is this: **both agents win
+0% against the top band, at a margin of about -53,000, and the entire six-version
+lineage has been trading bank deltas of ±5,000.** A ladder scores wins. No
+sequence of ±5,000 improvements flips a match you are losing by 53,000, which is
+why five promotions in a row moved the rating by nothing much in either
+direction. The gate was measuring a real quantity that cannot reach the goal.
+
+*A broken pool underneath the broken promotion.* `resolve_pool("real")` takes
+`frozen_names()[-2:]`, and `frozen_names()` sorts **alphabetically**, so
+`v10-wheatfix` sorts second and the reigning champion was never in the pool.
+Every `--opponents real` measurement from 2026-08-06 onward, including v10's own
+13-sigma gate, ran against v5 and v8 standing in for "recent".
+
+**The band pool is well calibrated; it was the wrong target.** Against the six
+`band-*` tapes the champion goes **3W-3L**, which is exactly a 746 rating. The
+instrument is not lying. But it was used as the optimisation target, and a 50%
+win rate against a 900-rated band has a ceiling of about 900. Nothing has ever
+been optimised against the 3200 band that the prizes are in.
+
+**The gap to the top is sales volume, and it is 5x.** Champion vs the four
+`meta-*` tapes, `fast_play(metrics=True)`, at each tape's own seed:
+
+| | our bank | their bank | our land use | theirs | our units sold | theirs | our products | theirs |
+|---|---|---|---|---|---|---|---|---|
+| meta-a | 92,943 | 144,814 | 0.65 | 0.80 | 839 | **4,427** | 5 | 9 |
+| meta-b | 58,091 | 121,692 | 0.70 | 0.80 | 850 | **4,348** | 5 | 9 |
+| meta-c | 75,133 | 128,132 | 0.69 | 0.79 | 872 | **4,348** | 5 | 9 |
+| meta-e | 65,475 | 120,400 | 0.68 | 0.80 | 848 | **3,547** | 5 | 9 |
+
+0W-4L. Land use differs by 1.2x. **Volume differs by 5x**, and per-unit realised
+price runs the other way: ~$111/unit for us against ~$33 for them. They win on
+throughput, not on price.
+
+`agent/params.json` says why, arithmetically:
+
+```
+target_melon_tiles 17   target_strawberry_tiles 12   target_wheat_tiles 2
+target_carrot_tiles 0   target_tomato_tiles 0        target_geese 0
+sell_floor_frac: MELON 0.486  MILK 0.314  FERTILIZER 0.323   <- dumped
+                 CARROT 1.237 STRAWBERRY 1.279 WOOL 1.001    <- hoarded
+```
+
+17x0.55 + 12x0.24 + 2x0.80 = **13.8 units/tile-day/quadrant**, which is ~850
+units a season and matches the census exactly. We grow the two lowest-yield
+crops, on the two most punishing glut curves (melon `sq`/3.60 to a $1 floor,
+strawberry `linear`), dump those below half base price, and hoard the resilient
+ones. **Zero geese**, when egg is 1.00/tile/day on a `log` curve that only moves
+$50 to $40 and `CARE` doubles goose output.
+
+This is issue #48's measurement, unacted on for twelve days: 7 of 9 products end
+*above* base price with inventory below I0, we sell 3 of 9, and the only two
+discounted products are melon and fertilizer — the two we concentrate on. It
+also reframes the most expensive decision in the project: `target_wheat_tiles: 9`
+gave the **highest bank in a 65-variant sweep (+11,500)** and was rejected at
+-3.31 sigma on margin measured against a pool of our own lineage.
+
+So the standing conclusion from docs/6 — "parameter search on this policy is
+exhausted, the rest is intra-day scheduling" — is **half right**. Scheduling is
+worth ~1.2x of land use. The portfolio is worth ~5x of volume, and it was never
+searched, because every bound and every judge pointed the other way.
+
+**Four silent bugs, all in the instruments.** None raised; all produced complete
+episodes with plausible numbers.
+
+1. `resolve_pool("real")` took `frozen_names()[-2:]` and `frozen_names()` sorted
+   **lexicographically**, so `v10-wheatfix` sorted second and the reigning
+   champion was never in the pool. Every `--opponents real` run after v10 was
+   frozen -- including v10's own 13-sigma gate -- ran against v5 and v8.
+2. `make gate` with no `CHAMPION=` compared against **`Params()` dataclass
+   defaults**, the hand-tuned baseline that banks 24,895. Every candidate passes
+   that. `sim.gate` now reads a tracked `CHAMPION` file and refuses to guess.
+3. **`TapeAgent` was a no-op on the slow path.** `kaggle_environments` truncates
+   agent arguments with `agent.__code__.co_argcount`; a class instance has no
+   `__code__`, so `__call__(obs)` was invoked with two arguments, the TypeError
+   was swallowed by `Agent.act`'s own `except Exception` into a no-op action, and
+   the seat still finished `DONE`. On seed 20000 vs meta-a, `fast_play` gave
+   `[105,504, 151,737]` and `harness.play` gave `[114,521, 3,000]`.
+4. **`submission.tar.gz` shipped parameters that were not `agent/params.json`.**
+   Nothing had ever validated the archive. Finding it *recovered v11's
+   parameters*, which the project had written off as unrecoverable, and they are
+   now frozen as `v11-hedge`.
+
+**Two refutations of our own new hypotheses**, both worth recording because both
+looked obvious:
+
+- *SELL is starved by the 10-order market budget.* No. `sell_order_floor` swept
+  0..6 makes units sold **fall** (858 -> 645) and bank fall with it; the slots
+  come out of BUY_SEED and HIRE and cost more production than the extra SELL
+  orders move. We end a season with ~9 unsold units, so we already sell nearly
+  everything we grow. The gap is **production**, not order slots, not sale
+  scheduling, and not the endgame.
+- *Transcribing the meta's tile counts is enough.* No. `search/archetypes.py
+  metabuild` sets exactly the build above and reaches **30% land use**, the worst
+  of the five archetypes (`diversified` 40.5%, `premium` 45.4%, `staples` 45.0%,
+  `livestock` 43.5%). Our policy cannot service 40 strawberry tiles. Whatever
+  closes the gap is upstream of the portfolio.
+
+**The pool is now current.** `make refresh-tapes DATE=2026-08-16` mints tapes from
+the day's episode dataset, keeping only seats that banked >=110,000 and survive
+three unseen seeds. Four came through, including the present leader (カワシギ,
+3228.5) and Utkarsh #2; they bank 161,000-187,000 on fresh seeds. Against the
+eight-tape `top` pool over 4 clean seeds and both seats, v10 wins **0 of 8** at
+margins of -52,658 to **-83,112**, and the mix is:
+
+```
+       units   WHEA  CARR  TOMA  STRA  MELO   EGG  MILK  WOOL  FERT
+us       865    131     0     0   107   157     0   302     0   167
+them   3,748  1,176    10     2   584   188     4   564   351   869
+```
+
+Wheat 9x, fertilizer 5x, strawberry 5x, milk 2x, wool from zero. Fertilizer is
+the cheapest of those to attack: every animal yields one free per day regardless
+of care, it bases at $100, and `COLLECT_FERTILIZER` is a single action.
+
+So the live question is narrower than it was this morning: **we grow ~865 units a
+season on 69% of our land and they grow ~3,750 on 80% of theirs, with the same
+number of plant actions per day.** That is roughly 4x the output per productive
+tile-day, and it is not order slots, not sale scheduling and not the target
+vector. The remaining candidates are yield per harvest -- fertilizer coverage,
+watering discipline, and crop cycle length -- and intra-day scheduling (#30,
+#40). #40 in particular is now the highest-value open issue: nobody has ever
+counted where the ~200 unit-actions a day actually go, and every invalid action
+in this engine is a silent no-op.
+
 ### Next
 
-- CEM over the 41 searchable params, then re-gate on a held-out seed set.
-- Freeze the tuned agent as an arena opponent so later candidates face something
-  real rather than only the built-ins.
-- Milestone 6: per-turn forward-sim planner using the unused 1 s/turn.
-  **First step is to test the hypothesis** that `kaggle_environments` is
-  importable inside the submission sandbox, which would allow exact rollouts.
+The loop, not the list: **measure against the 3200 band, submit daily, record
+what the ladder says.** See `AGENTS.md` for the operating rules.
+
+- **Slot discipline.** One anchor we believe in, one challenger per day. A fresh
+  submission restarts at 600 and needs ~24-48h to converge, so a rating younger
+  than that is not evidence. Every submission gets a `ledger.json` row the same
+  day.
+- **Throughput rebuild** (the only workstream that can move the score): mint a
+  top-band tape pool from the current top 20, widen the bounds that cap volume
+  (`target_wheat_tiles`, `target_carrot_tiles`, `target_geese`,
+  `target_tomato_tiles`, `sell_floor_frac`), add a `volume` archetype, reserve
+  SELL slots in the 10-order market budget, then search from there against the
+  top band with opponents held out.
+- **Calibration as a first-class instrument.** `make calibrate` joins ledger
+  local-claims against realised ratings. If the gate does not predict the
+  ladder, the gate criterion changes — that is the point of measuring it.
+- Deferred, and still open: the search-methodology backlog (#65/#67/#68/#69) and
+  Milestone 6, the per-turn forward-sim planner using the unused 1 s/turn (#10).
+  We use 0.03% of the per-turn budget. **Its first step is still a probe
+  submission** testing whether `kaggle_environments` imports inside the
+  submission sandbox, which would allow exact rollouts.

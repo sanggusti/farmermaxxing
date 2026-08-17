@@ -27,9 +27,19 @@ def make_agent(params=None):
 
 
 def resolve(spec):
-    """'starter' -> the builtin name; a Params -> a callable; a path -> itself."""
+    """'starter' -> the builtin name; a Params -> a callable; a path -> itself.
+
+    `tape:<name>` is loaded here too, mirroring `sim.fastplay._resolve`. Tapes
+    travel through the pool as short strings so the Modal fan-out ships ~10
+    bytes per episode instead of ~126 KB, but the slow path is what anything
+    needing a step history uses (`sim.mix`, `sim.arena --fast False`), and it
+    used to hand `"tape:meta-a"` straight to kaggle_environments as a filename.
+    """
     if isinstance(spec, Params):
         return make_agent(spec)
+    if isinstance(spec, str) and spec.startswith("tape:"):
+        from sim.tape import load as load_tape
+        return load_tape(spec[len("tape:"):])
     return spec
 
 

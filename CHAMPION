@@ -1,0 +1,21 @@
+# The reigning champion: the snapshot in sim/opponents/ that every candidate
+# must beat. `sim.gate` reads this, so a gate can never silently run against
+# Params() dataclass defaults (which any candidate beats trivially).
+#
+# v10-wheatfix, on measurement rather than on the leaderboard column:
+#
+#   pool         v10 mean   v8 mean    v10 win   v8 win   v10 beats v8 on margin
+#   top (4sd)      87,625    81,726       0.0%     0.0%   all 4 opponents
+#   band (6sd)     90,260    86,244      36.1%    29.2%   all 6 opponents
+#
+# The leaderboard column disagrees -- v8 shows 853.9 and v10 746.1 -- and it is
+# NOT evidence, because a submission restarts at 600 and climbs: v8 held a slot
+# for 2h45m (roughly 15 episodes, still rising) while v10 has had eleven days to
+# converge. Comparing a partially-climbed rating with a settled one is the
+# mistake, not the gate. Resolving it costs one submission and 36 hours; until
+# that is done, treat v8's 853.9 as an artifact.
+#
+# Change this only when a CONVERGED ladder reading says to. On 2026-08-06 a
+# local gate promoted v10 over v8 and the recorded consequence was -108 points,
+# which is exactly the confound above. See ledger.json.
+v10-wheatfix

@@ -229,14 +229,21 @@ def summarise_cells(rows, labels):
     return out
 
 
-# Kept in sync with sim.arena.CENSUS_KEYS by tests/test_census.py; duplicated
-# because this module must import cleanly without the sim package present.
+# Kept in sync with sim.arena.CENSUS_KEYS by
+# tests/test_league.py::test_census_key_lists_stay_in_sync; duplicated because
+# this module must import cleanly without the sim package present.
+#
+# The per-product `sell_units_*` keys are what located the real gap on
+# 2026-08-17: ~870 units of 5 products for us against ~4,170 of 9 for the top of
+# the ladder, on the same board. Aggregates could not show it.
+_CENSUS_PRODUCTS = ("WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON",
+                    "EGG", "MILK", "WOOL", "FERTILIZER")
 _CENSUS_KEYS = (
     "productive_tile_day_frac", "weed_tile_day_frac",
     "idle_structure_tile_day_frac", "mean_unlocked_tiles", "max_quadrants",
     "plant_actions_per_day", "products_sold_distinct", "sell_units_total",
     "end_shed_units",
-)
+) + tuple(f"sell_units_{p}" for p in _CENSUS_PRODUCTS)
 
 
 @app.local_entrypoint()

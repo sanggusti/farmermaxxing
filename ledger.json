@@ -1,0 +1,138 @@
+{
+  "submissions": [
+    {
+      "date": "2026-08-05T02:20:22Z",
+      "local": {
+        "metric": "holdout_bank",
+        "pool": "starter",
+        "value": 83586.0
+      },
+      "note": "CEM v2: crop-led portfolio. The only submission id recorded anywhere before this ledger existed (docs/2). Issue #25 confirmed the local number overstated the ladder by ~25%: episodes 90069549 (64,625-54,216 W) and 90070208 (59,553-62,425 L).",
+      "params_sha256": "d50ba40c4e7adef7",
+      "ratings": [
+        {
+          "observed": "2026-08-17",
+          "score": 667.6
+        }
+      ],
+      "role": "retired",
+      "submission_id": 55255699,
+      "version": "v2"
+    },
+    {
+      "date": "2026-08-05T03:28:21Z",
+      "local": {
+        "metric": "clean_bank",
+        "pool": "starter",
+        "value": 109606.0
+      },
+      "note": "CEM v3 on fixed code. Beat v2 91.7% head-to-head locally and scored LOWER on the ladder (645.3 vs 667.6). The first disagreement between local evidence and the ladder, unremarked at the time.",
+      "params_sha256": "e5f102524ddbd82a",
+      "ratings": [
+        {
+          "observed": "2026-08-17",
+          "score": 645.3
+        }
+      ],
+      "role": "retired",
+      "submission_id": 55257006,
+      "version": "v3"
+    },
+    {
+      "date": "2026-08-05T06:48:59Z",
+      "local": {
+        "metric": "clean_bank",
+        "pool": "starter",
+        "value": 137686.0
+      },
+      "note": "Multi-restart CEM sweep. 100% win vs the full opponent pool of the day, which was entirely our own lineage.",
+      "params_sha256": "612f9ed328586689",
+      "ratings": [
+        {
+          "observed": "2026-08-17",
+          "score": 774.7
+        }
+      ],
+      "role": "retired",
+      "submission_id": 55261512,
+      "version": "v4"
+    },
+    {
+      "date": "2026-08-06T03:39:11Z",
+      "local": {
+        "metric": "clean_bank",
+        "pool": "mixture(starter,v2-cem,v3-fixed,v4-champion)",
+        "value": 90842.0
+      },
+      "note": "First champion trained against an opponent mixture rather than starter alone. Gate 2.3 sigma, floor +43%.",
+      "params_sha256": "ff6f02c79180a3db",
+      "ratings": [
+        {
+          "observed": "2026-08-17",
+          "score": 832.3
+        }
+      ],
+      "role": "retired",
+      "submission_id": 55287313,
+      "version": "v5"
+    },
+    {
+      "date": "2026-08-06T06:11:19Z",
+      "local": {
+        "metric": "min_bank",
+        "pool": "frozen(8)",
+        "value": 52764.0
+      },
+      "note": "CEM ranked on MARGIN. 100% win vs all 8 frozen opponents; worst seed 52,764 vs v5's 33,768. Did NOT pass the gate (mean -384 against 1 sigma of 1,652) and was promoted on explicit override. Its 853.9 is the highest number in this column and is NOT evidence that v8 is our best agent: it held a slot for 2h45m, i.e. roughly 15 episodes, from a 600 start and still climbing, while v10 and v11 have had eleven days to converge. Re-measured 2026-08-17 on a fixed resolve_pool, v10 beats v8 on bank, floor, win rate and per-opponent margin across both the top and band pools without exception. Resolving the ladder question costs one submission and 36h of leaving it alone.",
+      "params_sha256": "e98ab6f0bd430ca8",
+      "ratings": [
+        {
+          "observed": "2026-08-17",
+          "score": 853.9
+        }
+      ],
+      "role": "retired",
+      "submission_id": 55290443,
+      "version": "v8"
+    },
+    {
+      "date": "2026-08-06T08:55:35Z",
+      "local": {
+        "metric": "mean_bank_delta",
+        "pool": "real",
+        "value": 4138.0
+      },
+      "note": "Late wheat rotation: mix_switch_day 28->16 (it was after wheat's own plant cutoff, so late_target_mult was dead code). Gated at +4,138 paired 13 sigma per docs/6, which REPRODUCES (+4,016 on 6 clean seeds, worst 45,519->50,195); DEVELOPMENTS.md's +4,500 / 48,827->54,012 does not and was a transcription error. Ladder 746.1 against the 853.9 it replaced, but see submission 55290443: that comparison is confounded by convergence time. The real finding is that v10 and v8 BOTH win 0% against the top band at a margin of ~-53,000, so a +4,000 bank delta cannot flip a single match. Note the 'real' pool was itself broken at the time: resolve_pool sorted frozen snapshots alphabetically and took the last two, so the reigning champion was never in it.",
+      "params_sha256": "819d4f8f7841fa7b",
+      "ratings": [
+        {
+          "observed": "2026-08-17",
+          "rank": 2455,
+          "score": 746.1
+        }
+      ],
+      "role": "anchor",
+      "submission_id": 55294423,
+      "version": "v10"
+    },
+    {
+      "date": "2026-08-06T09:22:01Z",
+      "local": {
+        "metric": "margin",
+        "pool": "band(6 tapes, 840-1050 rated)",
+        "value": -2821.0
+      },
+      "note": "Diverse-archetype hedge for the second slot, replacing v8. 35.1% wins vs the band pool against v8's 25.6%. Statistically tied with v10 locally (+394, 0.20 sigma). Ladder 730.2. Never frozen at the time; RECOVERED 2026-08-17 from the stale submission.tar.gz at the repo root (mtime one minute before the submission, parameters matching its description exactly) and frozen as v11-hedge. Found by tests/test_submission.py::test_bundle_ships_the_promoted_params, which exists to stop a stale tarball shipping under a new version's message.",
+      "params_sha256": "e41f2731608dc48a",
+      "ratings": [
+        {
+          "observed": "2026-08-17",
+          "score": 730.2
+        }
+      ],
+      "role": "challenger",
+      "submission_id": 55294870,
+      "version": "v11"
+    }
+  ]
+}

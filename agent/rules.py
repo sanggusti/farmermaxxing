@@ -2,7 +2,7 @@
 
 Source of truth is `kaggle_environments/envs/kaggriculture/kaggriculture.py`,
 NOT the competition docs -- the host confirmed the docs disagree with the engine
-in several places. `tests/test_rules_parity.py` asserts these stay in sync.
+in several places. `tests/test_parity.py` asserts these stay in sync.
 """
 
 import math

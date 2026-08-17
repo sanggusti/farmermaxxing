@@ -51,6 +51,31 @@ _PARAMS = Params.from_json(_PARAMS_FILE) if os.path.exists(_PARAMS_FILE) else Pa
 # policy keeps no per-episode state, so a module-level singleton is safe.
 _POLICY = Policy(_PARAMS)
 
+# A turn that does nothing. `farmer` and `hands` take one action per unit and the
+# engine treats an empty list as "no units directed"; an empty market list is a
+# turn with no orders. This is a lost turn, not a lost episode.
+_PASS = {"farmer": [], "hands": [], "market": []}
+
 
 def agent(obs):
-    return _POLICY.act(obs)
+    """Never raise.
+
+    `agent/policy.py` contains no exception handling at all: 591 lines of
+    dictionary indexing into an observation whose schema is set by an engine
+    under active development, with rule changes landing weekly. One KeyError
+    anywhere in there sets the seat's status to ERROR, which forfeits the whole
+    match -- 720 turns thrown away for one bad turn, and the ladder scores the
+    forfeit.
+
+    So a failing turn degrades to a pass. Silently, because
+    `kaggle_environments` captures per-step stdout into the replay and a print
+    on every turn of a broken episode inflates a ~30 MB replay; the failure is
+    visible anyway as an agent that suddenly stops acting. Locally, set
+    FM_STRICT=1 to get the traceback instead -- every test does.
+    """
+    try:
+        return _POLICY.act(obs)
+    except Exception:
+        if os.environ.get("FM_STRICT"):
+            raise
+        return _PASS
