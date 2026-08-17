@@ -121,5 +121,9 @@ def main(episodes: int = 32, steps: int = 720):
 
     best = max(rows, key=lambda r: r["eps_per_sec"])
     print(f"\nbest: cpu={best['workers']} at {best['eps_per_sec']:.2f} eps/sec per container")
-    print(f"across 100 containers: {best['eps_per_sec'] * 100:.0f} eps/sec "
-          f"against {base * 100:.0f} at cpu=1")
+    # FM_MAX_CONTAINERS in modal_app.py defaults to 250, not the 100 this
+    # used to extrapolate from -- though score_population() still batches for
+    # `containers=100`, so at high population the extra 150 get no work.
+    cap = int(__import__("os").environ.get("FM_MAX_CONTAINERS", "250"))
+    print(f"across {cap} containers: {best['eps_per_sec'] * cap:.0f} eps/sec "
+          f"against {base * cap:.0f} at cpu=1")

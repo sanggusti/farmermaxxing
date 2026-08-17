@@ -115,6 +115,44 @@ class Params:
         "FERTILIZER": 0.35,
     })
 
+    # Market orders truncate at 10 per turn and `Policy._market_orders` spends
+    # them in a fixed cascade: HIRE, BUY_LAND, BUY_ANIMAL, BUY_SEED,
+    # BUY_PRODUCT, then SELL on whatever is left. So the earlier stages can
+    # starve SELL entirely -- HIRE alone will consume all ten and return.
+    #
+    # This is the mechanism behind docs/6's refuted "we are labour-limited"
+    # result: `hands_late` at 12, 15 and 18 scored *identically*, because the
+    # order budget saturated before the extra hires could be issued, and the
+    # attempt cost -36,959 of margin. It is also a candidate explanation for
+    # selling ~870 units a season where the top of the ladder sells ~4,170.
+    #
+    # `sell_order_floor` holds slots back for SELL, but only on turns when there
+    # is actually something in the shed to sell -- otherwise the reservation
+    # wastes them on day 0. Default 0 reproduces the previous behaviour exactly
+    # (verified bit-identical: 105,504 vs meta-a and 134,279 vs starter).
+    #
+    # MEASURED 2026-08-17, AND IT DOES NOT WORK. Swept 0..6 on v10 against
+    # meta-a and band-vishnu:
+    #
+    #   floor   vs meta-a   vs band-vishnu   units sold   land use
+    #       0     105,504           54,881          858      68.7%
+    #       1     105,790           54,783          864      68.7%
+    #       2     100,902           48,155          822      66.3%
+    #       4      81,064           44,838          759      72.2%
+    #       6      80,092           64,310          645      59.4%
+    #
+    # Units sold *falls* as slots are reserved, which refutes the hypothesis
+    # outright: the slots come out of BUY_SEED and HIRE, and they cost more
+    # production than the extra SELL orders can move. The 10-order budget is not
+    # what caps our sales volume -- we end the season with a mean of ~9 unsold
+    # units, so we already sell nearly everything we grow. The gap to the top of
+    # the ladder (~870 units against ~4,170) is a PRODUCTION gap.
+    #
+    # Left searchable and inert at 0, on the same reasoning as
+    # `plant_crops_per_turn`: this was a single-parameter sweep from one basin,
+    # which is exactly the evidence docs/6 distrusts elsewhere.
+    sell_order_floor: int = 0
+
     # The shed caps at 100 items and overflow is silently discarded, so relax
     # the floors once it starts filling up.
     shed_pressure_at: int = 70
@@ -214,7 +252,17 @@ SEARCH_SPACE = {
     "target_melon_tiles":     (0, 18, "i"),
     "target_carrot_tiles":    (0, 18, "i"),
     "target_tomato_tiles":    (0, 12, "i"),
-    "target_strawberry_tiles": (0, 12, "i"),
+    # Upper bound raised 12 -> 20 on 2026-08-17, for the same knife-edge reason
+    # as `land_buy_empty_max` above. Targets are PER QUADRANT and multiply by
+    # owned land, so 12 caps strawberry at 36 tiles on a three-quadrant farm --
+    # and the top of the ladder runs **40**, measured off replay 90044961 at
+    # days 15 and 21. v10 sits at exactly 12, i.e. pinned at the ceiling.
+    #
+    # This matters because docs/6 refuted "shift melon to strawberry" at -49,283
+    # with the note "strawberry is already at its bound". That refutation was
+    # measuring the bound. 20 puts the meta's build inside the box as an
+    # ordinary region rather than an unreachable corner.
+    "target_strawberry_tiles": (0, 20, "i"),
 
     "animal_cash_reserve":    (0, 4000, "f"),
     "seed_batch":             (2, 28, "i"),
@@ -250,6 +298,9 @@ SEARCH_SPACE = {
     "liquidate_days":         (1, 6, "i"),
     "shed_pressure_at":       (30, 98, "i"),
     "shed_pressure_dump":     (1, 50, "i"),
+    # Capped at 6 of the 10 slots: above that the farm cannot hire or restock
+    # seed at all, which is a different failure rather than a trade-off.
+    "sell_order_floor":       (0, 6, "i"),
 
     "sell_floor_frac.WHEAT":      (0.05, 1.6, "f"),
     "sell_floor_frac.CARROT":     (0.05, 1.6, "f"),

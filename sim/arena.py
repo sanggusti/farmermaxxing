@@ -21,6 +21,7 @@ import sys
 
 from sim.harness import play, make_agent
 from sim.fastplay import fast_play
+from sim.census import PRODUCTS as CENSUS_PRODUCTS
 from sim.opponents import resolve_pool
 from params import Params
 from obs import wandb_setup
@@ -64,10 +65,19 @@ def evaluate(params, opponents, seeds, steps=720, on_episode=None, labels=None,
                     "win": 1 if my_bank > their_bank else (0 if my_bank < their_bank else 0.5),
                     "status": r["statuses"][seat],
                 }
-                # Land/action census for OUR seat only. Merged flat so
-                # summarise() can average them without knowing the names.
+                # Land/action census for OUR seat, merged flat so summarise()
+                # can average them without knowing the names.
                 if "metrics" in r:
                     row.update(r["metrics"][seat])
+                    # ...plus the opponent's sales mix, under an `opp_` prefix.
+                    # Only the mix, not the whole census: what the opponent does
+                    # with its land is its business, but what it SELLS is the one
+                    # comparison that located the real gap -- ~850 units of 5
+                    # products for us against ~4,000 of 9 for the top of the
+                    # ladder, on the same board.
+                    row.update({f"opp_sell_units_{p}":
+                                r["metrics"][1 - seat].get(f"sell_units_{p}", 0)
+                                for p in CENSUS_PRODUCTS})
                 rows.append(row)
                 if on_episode:
                     on_episode(row)
@@ -88,6 +98,11 @@ def per_opponent(rows):
             "n": len(rs),
             "mean_bank": statistics.mean([r["bank"] for r in rs]),
             "win_rate": statistics.mean([r["win"] for r in rs]),
+            # Margin, because bank and wins come apart: v6 banked 81,623
+            # against v5 and won 0% of those matches. A per-opponent bank with
+            # no margin beside it cannot distinguish the two.
+            "mean_margin": statistics.mean([r["bank"] - r["opp_bank"] for r in rs]),
+            "min_bank": min(r["bank"] for r in rs),
         }
         for name, rs in out.items()
     }
@@ -107,12 +122,26 @@ CENSUS_KEYS = (
     "products_sold_distinct",
     "sell_units_total",
     "end_shed_units",
-)
+) + tuple(f"sell_units_{p}" for p in CENSUS_PRODUCTS)
 
 # Not averaged -- a mean of hashes is meaningless. Carried per-row so an
 # analysis can ask whether a bank advantage tracks the shop order, which would
 # make it an RNG artefact rather than a strategy. See sim.census.record_town.
 CONFOUND_KEYS = ("shop_order_hash",)
+
+
+def opponent_mix(rows):
+    """Mean per-product units the OPPONENTS sold, across these episodes.
+
+    Returns {} when the rows carry no census (metrics=False), so callers can
+    skip the comparison rather than print a row of zeros that reads as "the
+    opponent sold nothing".
+    """
+    key = f"opp_sell_units_{CENSUS_PRODUCTS[0]}"
+    if not rows or key not in rows[0]:
+        return {}
+    return {p: statistics.mean([r.get(f"opp_sell_units_{p}", 0) for r in rows])
+            for p in CENSUS_PRODUCTS}
 
 
 def shop_order_confound(rows):

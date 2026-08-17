@@ -1,6 +1,8 @@
 """Cross-entropy method over the agent's parameters.
 
-Keep a Gaussian over the 45 searchable scalars, sample a population, score each
+Keep a Gaussian over the 60 searchable scalars (see params.SEARCH_SPACE;
+36 float and 24 integer, because sell_floor_frac and late_target_mult each
+expand into one dimension per key), sample a population, score each
 against a fixed set of (opponent, seed, seat) cells, refit the Gaussian to the
 top slice, repeat.
 
@@ -214,6 +216,14 @@ def main():
                     help="pool spec used for SELECTION and reporting. Held "
                          "fixed so holdout scores stay comparable across "
                          "generations and across runs. Defaults to --opponents.")
+    ap.add_argument("--holdout-opponents", type=int, default=0,
+                    help="withhold this many opponents from TRAINING while "
+                         "keeping them in the reference pool. Seed splits do "
+                         "not catch opponent memorisation: a run trained on 4 "
+                         "of 6 band tapes scored +10,188 (3.96 sigma) on those "
+                         "4 and -8,940 (-1.89 sigma) on the 2 held out, and "
+                         "every instrument reported it as the day's best "
+                         "candidate.")
     ap.add_argument("--modal", action="store_true", help="fan out on Modal")
     ap.add_argument("--rng-seed", type=int, default=0)
     ap.add_argument("--group", default=None)
@@ -241,6 +251,23 @@ def main():
     train_opps, train_labels = resolve_pool(train_pool_spec)
     ref_opps, ref_labels = resolve_pool(ref_pool_spec)
 
+    # Opponent hold-out. The reference pool is resolved from the FULL spec above
+    # and left intact, so the withheld opponents still score every generation --
+    # they just never shape the parameters. That asymmetry is the whole point:
+    # `vs/<label>/*` then splits cleanly into memorised and generalised.
+    heldout_labels = []
+    if args.holdout_opponents > 0:
+        if args.holdout_opponents >= len(train_labels):
+            ap.error(f"--holdout-opponents {args.holdout_opponents} leaves "
+                     f"nothing to train on ({len(train_labels)} in the pool)")
+        keep = list(range(len(train_labels)))
+        drop = sorted(rng.sample(keep, args.holdout_opponents))
+        heldout_labels = [train_labels[i] for i in drop]
+        train_opps = [o for i, o in enumerate(train_opps) if i not in drop]
+        train_labels = [l for i, l in enumerate(train_labels) if i not in drop]
+        print(f"held out of training: {heldout_labels}")
+        print(f"training on         : {train_labels}")
+
     train_cells = build_cells(train_opps, train_labels, train_seeds)
     holdout_cells = build_cells(ref_opps, ref_labels, holdout_seeds)
     clean_cells = build_cells(ref_opps, ref_labels, clean_seeds)
@@ -262,7 +289,7 @@ def main():
     run_dir = os.path.join(RUNS_DIR, group)
     os.makedirs(run_dir, exist_ok=True)
     best_path = os.path.join(run_dir, "best_params.json")
-    # Selection is on HOLDOUT, never on train. With 41 free parameters and a
+    # Selection is on HOLDOUT, never on train. With 60 free parameters and a
     # handful of seeds, the train score is a fitting artefact; the ladder scores
     # us on episodes we have never seen.
     best_holdout, best_vec, best_train = float("-inf"), None, None
@@ -275,6 +302,7 @@ def main():
         "opponent": args.opponent,
         "fitness": args.fitness,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
+        "heldout_opponents": heldout_labels,
         "train_cells": len(train_cells), "holdout_cells": len(holdout_cells),
         "backend": "modal" if args.modal else "local",
         "init_params": args.init_params or "defaults", "init_spread": spread,
@@ -420,9 +448,30 @@ def main():
         print(f"clean (unbiased)  : {clean['mean_bank']:>12,.0f}  "
               f"worst {clean['min_bank']:,.0f}")
         print("clean per opponent:")
+        held = set(heldout_labels)
         for label, b in sorted((clean.get("by_opponent") or {}).items()):
-            print(f"  {label:<22} bank {b['mean_bank']:>11,.0f}   "
-                  f"win {b['win_rate']:>6.1%}")
+            mark = "h" if label in held else ("T" if held else " ")
+            print(f"  {mark} {label:<22} bank {b['mean_bank']:>11,.0f}   "
+                  f"win {b['win_rate']:>6.1%}   "
+                  f"margin {b.get('mean_margin', float('nan')):>+11,.0f}")
+        if held:
+            by_opp = clean.get("by_opponent") or {}
+            t = [b for l, b in by_opp.items() if l not in held]
+            h = [b for l, b in by_opp.items() if l in held]
+            if t and h:
+                tm = statistics.mean([b["mean_margin"] for b in t])
+                hm = statistics.mean([b["mean_margin"] for b in h])
+                tw = statistics.mean([b["win_rate"] for b in t])
+                hw = statistics.mean([b["win_rate"] for b in h])
+                print(f"  (T = trained against, h = held out)")
+                print(f"\ntrained-on margin : {tm:>+12,.0f}  win {tw:>6.1%}")
+                print(f"held-out  margin  : {hm:>+12,.0f}  win {hw:>6.1%}")
+                print(f"memorisation gap  : {tm - hm:>+12,.0f}")
+                if tm - hm > 5_000:
+                    print("  WARNING: the candidate is markedly better against the "
+                          "opponents it\n  trained on than against the ones it did "
+                          "not. That gap is the part of\n  the improvement that will "
+                          "not appear on the ladder.")
         clean_sel = selection_score(clean, sel_key)
         pct = f"{bias / abs(clean_sel):+.1%}" if clean_sel else "n/a"
         print(f"selection bias    : {bias:>+12,.0f}  ({pct} of the clean mean "

@@ -492,6 +492,13 @@ class Policy:
         market_inv = obs["market"]["inventory"]
         scale = len(me["unlocked_quadrants"])
 
+        # Slots held back for stage 6. The cascade below spends a hard budget of
+        # MAX_MARKET_ORDERS in order, so HIRE and BUY_SEED can leave SELL with
+        # nothing -- see `sell_order_floor` in params.py. Conditional on the shed
+        # being non-empty, because a reservation on a turn with nothing to sell
+        # is a slot thrown away.
+        buy_cap = MAX_MARKET_ORDERS - (p.sell_order_floor if shed else 0)
+
         # 1. Labour, at the start of each day. Hands act from the following
         # turn. Spread across the first few turns because market orders are
         # truncated at MAX_MARKET_ORDERS, so hiring only at hour 0 silently
@@ -504,8 +511,8 @@ class Policy:
                     break
                 money -= cost
                 orders.append(["HIRE"])
-                if len(orders) >= MAX_MARKET_ORDERS:
-                    return orders
+                if len(orders) >= buy_cap:
+                    break
 
         # 2. Land. More tiles is the only way past the action ceiling.
         n_extra = len(me["unlocked_quadrants"]) - 1
@@ -545,7 +552,7 @@ class Policy:
         # for the second crop never did.
         for crop in self._wanted_crops(counts, crops, day, scale,
                                        obs["market"]["prices"]):
-            if len(orders) >= MAX_MARKET_ORDERS:
+            if len(orders) >= buy_cap:
                 break
             held = seeds.get(crop, 0)
             need_seeds = min(counts["empty"], p.seed_batch) - held

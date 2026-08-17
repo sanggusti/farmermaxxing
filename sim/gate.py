@@ -20,8 +20,9 @@ import argparse
 import statistics
 import sys
 
-from sim.arena import evaluate, summarise, per_opponent, shop_order_confound
-from sim.opponents import resolve_pool
+from sim.arena import (evaluate, summarise, per_opponent, shop_order_confound,
+                       opponent_mix, CENSUS_PRODUCTS as PRODUCTS)
+from sim.opponents import resolve_pool, champion_params, champion_name
 from params import Params
 from obs import wandb_setup
 
@@ -61,12 +62,43 @@ def paired_stderr(cand_banks, champ_banks):
     return statistics.stdev(diffs) / len(diffs) ** 0.5
 
 
-def decide(cand, champ, by_opp, margin_sigmas=1.0, floor_tolerance=0.10):
+def holdout_split(cand_rows, champ_rows, trained_on):
+    """Paired banks restricted to opponents the candidate never trained against.
+
+    docs/6 measured why this has to be a check and not a footnote. A CEM run
+    trained on four of the six band tapes looked like the day's best candidate
+    at +3,812 margin and +9.5% wins. Split by opponent it was **+10,188
+    (3.96 sigma) on the four it trained against and -8,940 (-1.89 sigma) on the
+    two held out**. The seed splits the project has run since docs/2 do not
+    catch this at all -- a four-opponent training pool is small enough to
+    memorise, and the gate scored the memorisation as generalisation.
+
+    Returns (cand_banks, champ_banks) over held-out cells, positionally paired.
+    """
+    if not trained_on:
+        # No declared training pool means no held-out subset. Returning every
+        # cell here would make the fifth check a duplicate of the second and
+        # report a spurious PASS, which is worse than not checking.
+        return [], []
+    trained = set(trained_on)
+    pairs = [(c["bank"], h["bank"]) for c, h in zip(cand_rows, champ_rows)
+             if c["opponent"] not in trained]
+    return [c for c, _ in pairs], [h for _, h in pairs]
+
+
+def decide(cand, champ, by_opp, margin_sigmas=1.0, floor_tolerance=0.10,
+           holdout=None):
     """The decision rule, as a pure function of summary statistics.
 
     Kept separate from episode running so it can be tested directly. Driving
     this through real gameplay makes the test slow and, worse, dependent on
     whatever the agent happens to do at a given episode length.
+
+    `holdout`, when given, is the (cand_banks, champ_banks) pair from
+    `holdout_split` and adds a fifth check. It is deliberately a *no-regression*
+    test rather than an improvement test: the held-out subset is small, so
+    demanding a positive delta there would reject good candidates on noise,
+    while demanding it not be a sigma worse catches memorisation.
 
     Returns (checks, delta, combined_se) where checks is a list of
     (label, passed, detail).
@@ -94,11 +126,24 @@ def decide(cand, champ, by_opp, margin_sigmas=1.0, floor_tolerance=0.10):
          not losing,
          f"losing record against {losing}"),
     ]
+
+    if holdout:
+        h_cand, h_champ = holdout
+        h_se = paired_stderr(h_cand, h_champ)
+        if h_cand and h_se:
+            h_delta = (statistics.mean(h_cand) - statistics.mean(h_champ))
+            checks.append((
+                "no regression on held-out opponents",
+                h_delta > -margin_sigmas * h_se,
+                f"held-out delta {h_delta:+,.0f} over {len(h_cand)} cells "
+                f"(1 sigma = {h_se:,.0f})"))
+
     return checks, delta, combined_se
 
 
 def run_gate(candidate, champion, pool_spec, n_seeds, steps,
-             margin_sigmas=1.0, floor_tolerance=0.10, offset=CLEAN_OFFSET):
+             margin_sigmas=1.0, floor_tolerance=0.10, offset=CLEAN_OFFSET,
+             trained_on=None):
     """Evaluate candidate and champion identically, then apply `decide`."""
     opponents, labels = resolve_pool(pool_spec)
     seeds = [offset + i for i in range(n_seeds)]
@@ -116,7 +161,8 @@ def run_gate(candidate, champion, pool_spec, n_seeds, steps,
     by_opp = per_opponent(cand_rows)
 
     checks, delta, combined_se = decide(
-        cand, champ, by_opp, margin_sigmas, floor_tolerance)
+        cand, champ, by_opp, margin_sigmas, floor_tolerance,
+        holdout=holdout_split(cand_rows, champ_rows, trained_on))
     return (checks, cand, champ, by_opp, delta, combined_se,
             cand_rows, champ_rows)
 
@@ -125,8 +171,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidate", default="agent/params.json")
     ap.add_argument("--champion", default=None,
-                    help="params.json to beat; defaults to hand-set defaults")
-    ap.add_argument("--opponents", default="all")
+                    help="params.json to beat; defaults to the snapshot named "
+                         "in the CHAMPION file at the repo root")
+    ap.add_argument("--opponents", default="top",
+                    help="pool spec (top|band|real|frozen|all|names). Defaults "
+                         "to `top`, the prize band -- see sim.opponents")
+    ap.add_argument("--trained-on", default=None,
+                    help="comma-separated opponent labels the candidate was "
+                         "SEARCHED against. The rest of the pool becomes a "
+                         "held-out subset and gets its own check.")
     ap.add_argument("--seeds", type=int, default=8)
     ap.add_argument("--steps", type=int, default=720)
     ap.add_argument("--margin-sigmas", type=float, default=1.0)
@@ -138,20 +191,37 @@ def main():
     args = ap.parse_args()
 
     candidate = Params.from_json(args.candidate)
-    champion = Params.from_json(args.champion) if args.champion else Params()
+    # NOT `Params()`. Falling back to dataclass defaults meant `make gate` with
+    # no CHAMPION= compared a tuned candidate against the hand-written baseline
+    # that banks 24,895, which every candidate passes trivially. The gate then
+    # printed GATE PASSED and meant nothing by it.
+    if args.champion:
+        champion = Params.from_json(args.champion)
+        champion_label = args.champion
+    else:
+        champion = champion_params()          # raises if CHAMPION is unusable
+        champion_label = f"CHAMPION -> {champion_name()}"
 
     if not args.wandb:
         import os
         os.environ["WANDB_MODE"] = "disabled"
 
     offset = HOLDOUT_OFFSET if args.on_selection_seeds else CLEAN_OFFSET
+    trained_on = ([s.strip() for s in args.trained_on.split(",") if s.strip()]
+                  if args.trained_on else None)
     checks, cand, champ, by_opp, delta, se, cand_rows, champ_rows = run_gate(
         candidate, champion, args.opponents, args.seeds, args.steps,
-        args.margin_sigmas, args.floor_tolerance, offset=offset)
+        args.margin_sigmas, args.floor_tolerance, offset=offset,
+        trained_on=trained_on)
     passed = all(ok for _, ok, _ in checks)
 
     print(f"candidate : {args.candidate}")
-    print(f"champion  : {args.champion or 'Params() defaults'}")
+    print(f"champion  : {champion_label}")
+    print(f"pool      : {args.opponents} -> {sorted(by_opp)}")
+    if trained_on:
+        held = sorted(set(by_opp) - set(trained_on))
+        print(f"trained on: {sorted(trained_on)}")
+        print(f"held out  : {held or 'NOTHING -- the pool is entirely trained-on'}")
     kind = "selection (BIASED)" if args.on_selection_seeds else "clean"
     print(f"seeds     : {kind} {offset}..{offset + args.seeds - 1}, both seats")
     print()
@@ -170,6 +240,20 @@ def main():
                   f"{s['mean_max_quadrants']:>12.2f} "
                   f"{s['mean_products_sold_distinct']:>9.1f} "
                   f"{s['mean_end_shed_units']:>8.0f}")
+        # The revenue mix, side by side with the opponents'. This is the readout
+        # for the throughput gap: against the top of the ladder we sell ~850
+        # units of 5 products where they sell ~4,000 of 9, and no aggregate
+        # metric the project logged could show that.
+        opp_mix = opponent_mix(cand_rows)
+        print(f"\n{'':<12} {'units':>7}  " + "  ".join(f"{p[:4]:>5}" for p in PRODUCTS))
+        for name, s in (("candidate", cand), ("champion", champ)):
+            print(f"{name:<12} {s.get('mean_sell_units_total', 0):>7,.0f}  " +
+                  "  ".join(f"{s.get(f'mean_sell_units_{p}', 0):>5,.0f}"
+                            for p in PRODUCTS))
+        if opp_mix:
+            print(f"{'opponents':<12} {sum(opp_mix.values()):>7,.0f}  " +
+                  "  ".join(f"{opp_mix.get(p, 0):>5,.0f}" for p in PRODUCTS))
+        print()
         cf_c = shop_order_confound(cand_rows)
         cf_h = shop_order_confound(champ_rows)
         if cf_c and cf_h:
@@ -186,8 +270,16 @@ def main():
                       "raise --seeds to use it)")
         print()
     print("per opponent (candidate):")
+    champ_by_opp = per_opponent(champ_rows)
+    trained = set(trained_on or ())
     for name, b in sorted(by_opp.items()):
-        print(f"  {name:<22} bank {b['mean_bank']:>11,.0f}   win {b['win_rate']:>6.1%}")
+        mark = "T" if name in trained else (" " if not trained else "h")
+        cm = b["mean_margin"] - champ_by_opp[name]["mean_margin"]
+        print(f"  {mark} {name:<22} bank {b['mean_bank']:>11,.0f}   "
+              f"win {b['win_rate']:>6.1%}   margin {b['mean_margin']:>+11,.0f}"
+              f"   vs champ {cm:>+10,.0f}")
+    if trained:
+        print("  (T = trained against, h = held out)")
     print()
     for label, ok, detail in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {label:<42} {detail}")

@@ -131,3 +131,53 @@ def test_recorded_tapes_are_not_degenerate_on_unseen_seeds():
     for name in tape.names():
         v = tape.verify_tape(name, seeds=(20000, 20001))
         assert v["ok"], f"{name} collapsed on unseen seeds: {v['banks']}"
+
+
+def test_tape_accepts_the_engine_slow_path_calling_convention():
+    """`kaggle_environments` passes (observation, configuration) to a class.
+
+    `Agent.act` builds `[observation, configuration]` and truncates it only when
+    the agent has a `__code__` attribute:
+
+        if hasattr(self.agent, "__code__"): args = args[:co_argcount]
+
+    A class instance has none, so `TapeAgent.__call__` receives TWO arguments on
+    the slow path. When it took one, the TypeError was swallowed by `Agent.act`'s
+    own `except Exception` into a no-op action and the seat still finished DONE:
+    on seed 20000 vs meta-a, `fast_play` gave [105,504, 151,737] while
+    `harness.play` gave [114,521, 3,000]. Nothing errored, nothing warned, and
+    every number derived from the slow path was wrong.
+    """
+    names = tape.names()
+    if not names:
+        pytest.skip("no tapes recorded")
+    agent = tape.load(names[0])
+    obs = {"day": 0, "hour": 3}
+    assert agent(obs) == agent(obs, {"episodeSteps": 720}), (
+        "the tape behaves differently depending on how many arguments the "
+        "harness passes it"
+    )
+
+
+@pytest.mark.slow
+def test_the_fast_and_slow_paths_agree_on_a_tape_opponent():
+    """Same episode, both harnesses, identical banks.
+
+    `tests/test_fastplay.py` pins this for built-ins and for frozen `Params`
+    opponents. Tapes were the one opponent kind not covered, and they were the
+    one that silently disagreed.
+    """
+    import os
+    import sys
+
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(REPO, "agent"))
+    from params import Params
+    from sim.fastplay import fast_play
+    from sim.harness import play, make_agent
+
+    p = Params.from_json(os.path.join(REPO, "agent", "params.json"))
+    name = tape.names()[0]
+    fast = fast_play(p, f"{TAPE_PREFIX}{name}", seed=20000)["banks"]
+    slow = play(make_agent(p), f"{TAPE_PREFIX}{name}", seed=20000)["banks"]
+    assert fast == slow, f"fast {fast} vs slow {slow} against {name}"

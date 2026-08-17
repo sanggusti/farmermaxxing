@@ -72,7 +72,21 @@ class TapeAgent:
         self.actions = actions
         self.name = name
 
-    def __call__(self, obs):
+    def __call__(self, obs, _config=None):
+        # `_config` exists for the SLOW path, and its absence was a silent bug.
+        # `kaggle_environments.agent.Agent.act` builds `[observation,
+        # configuration]` and then truncates it with
+        #
+        #     if hasattr(self.agent, "__code__"): args = args[:co_argcount]
+        #
+        # A class instance has no `__code__`, so the truncation is skipped and
+        # __call__ is invoked with TWO arguments. The resulting TypeError is
+        # caught by `Agent.act`'s own `except Exception`, turned into a no-op
+        # action, and the seat still finishes DONE. Measured on seed 20000 vs
+        # meta-a: fast_play gives banks [105,504, 151,737] and harness.play gave
+        # [114,521, 3,000] -- the opponent sat still for the whole season and
+        # every derived number was quietly wrong. `make_agent()` was unaffected
+        # because it returns a closure, which does have `__code__`.
         t = obs["day"] * TURNS_PER_DAY + obs["hour"]
         # The action recorded at index t+1 is the one taken FROM the
         # observation at index t. Off by one here still produces a complete

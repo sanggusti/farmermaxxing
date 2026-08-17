@@ -20,6 +20,14 @@ from collections import Counter
 
 TURNS_PER_DAY = 24
 
+# The nine tradeable products, in the engine's own order. Duplicated from
+# agent/rules.py rather than imported, because sim/census.py runs inside the
+# Modal image where only the mounted directories are importable and the import
+# order differs; tests/test_parity.py pins agent/rules.py against the engine, so
+# the risk is a stale copy here, not a wrong one there.
+PRODUCTS = ("WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON",
+            "EGG", "MILK", "WOOL", "FERTILIZER")
+
 
 def tile_stats(farm):
     """Land accounting for one farm at one instant.
@@ -168,6 +176,19 @@ class EpisodeCensus:
             "products_sold_distinct": sum(
                 1 for v in self.sell_units[i].values() if v > 0),
             "sell_units_total": sum(self.sell_units[i].values()),
+            # Per-product volume. `sell_units_total` and `products_sold_distinct`
+            # together say "we sell few units of few things"; they cannot say
+            # WHICH things, and that turned out to be the whole story.
+            #
+            # Measured 2026-08-17 against the top of the ladder: they sell
+            # 3,547-4,427 units across 9 products, we sell ~850 across 5, and
+            # our realised price is ~$111/unit against their ~$33. We grow the
+            # two lowest-yield crops (melon 0.55, strawberry 0.24 per tile-day)
+            # on the two harshest glut curves and dump them below half base
+            # price, while 7 of 9 products end the season ABOVE base price
+            # untouched (issue #48). Nothing in the metrics made that visible,
+            # so twelve versions of search optimised around it.
+            **{f"sell_units_{p}": self.sell_units[i].get(p, 0) for p in PRODUCTS},
             "end_shed_units": self.end_shed_units[i],
             # Confound tracker, not a performance metric. Grouped on the FIRST
             # shop only: it unlocks on day 3 and drains for 27 days, so it is
