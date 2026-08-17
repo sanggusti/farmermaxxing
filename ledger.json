@@ -109,6 +109,10 @@
           "observed": "2026-08-17",
           "rank": 2455,
           "score": 746.1
+        },
+        {
+          "observed": "2026-08-17",
+          "score": 741.7
         }
       ],
       "role": "anchor",
@@ -133,6 +137,20 @@
       "role": "challenger",
       "submission_id": 55294870,
       "version": "v11"
+    },
+    {
+      "date": "2026-08-17 12:02:21.980000",
+      "local": {
+        "metric": "win_rate",
+        "pool": "band(6 tapes, 840-1050 rated)",
+        "value": 0.438
+      },
+      "note": "First champion selected against the top of the ladder. CEM 96x40 vs an 8-tape pool minted from 2026-08-16 episodes (incl. the current leader), 2 opponents held out, ranked on margin, warm-started from v10 at spread 0.22 after target_strawberry_tiles' ceiling moved 12->20; the search used it immediately (12->15), plus plant_crops_per_turn 1->3, first geese, wool sell floor 1.00->0.83 so it trades at all, rival-aware selling on. Band win rate 43.8% vs v10's 33.3% (8 clean seeds x 2 seats, paired); top-pool worst seed 56,912 vs 43,915; held-out-opponent delta +6,394 at 2 sigma. Mean bank flat (+211) on purpose. GATE FAILED its mean-by-1-sigma and beat-every-opponent checks; promoted on explicit override, as v8 was. Evicted v10 (741.7) from the scored pair, leaving v11 (730.2) as the floor until this converges.",
+      "params_sha256": "24b88164bd1fb077",
+      "ratings": [],
+      "role": "challenger",
+      "submission_id": 55577866,
+      "version": "v12"
     }
   ]
 }

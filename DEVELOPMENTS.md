@@ -604,10 +604,71 @@ watering discipline, and crop cycle length -- and intra-day scheduling (#30,
 counted where the ~200 unit-actions a day actually go, and every invalid action
 in this engine is a silent no-op.
 
+### 2026-08-17, v12: the first champion selected against the top of the ladder
+
+CEM, population 96 x 40 generations, against the eight-tape `top` pool with **two
+opponents held out**, ranked on **margin**, warm-started from v10 at spread 0.22.
+Submission **55577866**. ~246,000 episodes on Modal.
+
+**The bound widening was load-bearing.** `target_strawberry_tiles` had a ceiling
+of 12 with v10 pinned exactly on it; raised to 20, the search moved to **15**
+within the run. Alongside it: `plant_crops_per_turn` 1 -> 3, `target_geese` 0 ->
+1 (the first geese any champion has run), `target_cows` 4 -> 5, and sell floors
+down almost across the board -- **WOOL 1.001 -> 0.827**, so wool can trade at all
+for the first time; MELON 0.486 -> 0.365; WHEAT 0.366 -> 0.266; MILK 0.314 ->
+0.226. `rival_supply_urgency` 0.0 -> 0.198. Hands 4/8/9 -> 5/10/10.
+
+Gated against v10 on 8 clean seeds and both seats, paired:
+
+| | top pool (8 opp) | band pool (6 opp) |
+|---|---|---|
+| mean bank | 83,438 vs 83,227 (**+211**, 1 sigma 1,495) | 92,338 vs 92,037 (**+301**, 1 sigma 2,191) |
+| **win rate** | 0.0% vs 0.0% | **43.8% vs 33.3%** |
+| worst seed | **56,912 vs 43,915** | 54,415 vs 50,195 |
+| held-out opponents | **+6,394 over 32 cells, 1 sigma 3,206** | n/a |
+| products sold | **6 vs 5** (eggs, 99 units) | 6 vs 5 |
+
+**The gate failed, and was overridden.** Two of five checks failed. "Mean beats
+champion by >1 sigma" failed at +211 -- flat bank, which is deliberately not what
+this was selected on, and the same quantity that gained +4,133 for v10 while
+costing 108 rating points. "Beats every opponent in the pool" failed because we
+win 0% against the top band, which is unachievable for anything we can currently
+build; that check is calibrated for a pool of our own lineage. Recorded here
+rather than quietly relaxed, as v8's override was.
+
+What *did* move is the ladder-relevant part: **+10.5 points of win rate on the
+band pool** we are actually matched into, a **30% higher floor** on the top pool,
+better margin against all four current top tapes (+4,005 to +14,263) and five of
+six band tapes, and the new held-out-opponent check passing at 2 sigma -- so this
+is generalisation, not memorisation of the six it trained on.
+
+Two honest caveats. It is **worse against the four stale `meta-*` tapes** (-1,262
+to -1,642 each), which date from 2026-08-05 when the leader was 3047. And the
+shop-unlock confound is high: omega^2 0.52 against the champion's 0.43, so a large
+share of the bank spread tracks which shop unlocked first. The partial answer is
+that the win-rate and floor gains reproduce across two pools with disjoint
+opponents, which is the reproduction that warning asks for; the bank gain does not
+reproduce and is not claimed.
+
+Submitting evicted v10 (741.7) from the scored pair, leaving v11 (730.2) as the
+floor until v12 converges. Standing at submission time: **rank 2478 of 4915, score
+741.7**, median 748.5, top-10 cutoff 2957.0.
+
 ### Next
 
 The loop, not the list: **measure against the 3200 band, submit daily, record
 what the ladder says.** See `AGENTS.md` for the operating rules.
+
+- **Read v12's rating after ~36h** (`make ladder-sync`). If it converges above
+  741.7, move `CHAMPION` to `v12-topband` -- and note that this will be the first
+  promotion in the project's history decided by the ladder rather than by a local
+  gate. If it lands below, the band-pool win rate does not predict rating either,
+  and `make calibrate` will have earned its keep twice.
+- **Fix the gate's fourth check.** "No losing record against any single opponent"
+  cannot pass against a pool we lose to 100% of the time, so on `POOL=top` it
+  fails identically for every candidate and carries no information. It should
+  compare win rate *against the champion's* per-opponent win rate, not against
+  0.5.
 
 - **Slot discipline.** One anchor we believe in, one challenger per day. A fresh
   submission restarts at 600 and needs ~24-48h to converge, so a rating younger

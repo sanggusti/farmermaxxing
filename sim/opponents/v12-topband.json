@@ -1,4 +1,6 @@
 {
+  "_frozen_at": "2026-08-17T12:00:23Z",
+  "_notes": "Submission candidate 2026-08-17. CEM 96x40 vs the 8-tape top pool, 2 opponents held out, ranked on margin, warm-started from v10 at spread 0.22 after target_strawberry_tiles' ceiling moved 12->20 (the search used it immediately: 12->15). Band win rate 43.8% vs v10's 33.3%; top-pool floor 56,912 vs 43,915; held-out-opponent delta +6,394 at 2 sigma. Gate FAILED mean-by-1-sigma (+211, flat bank, deliberately not what this was selected on) and beat-every-opponent (0% vs the top band, unachievable for anything we can currently build). Promoted on explicit override, as v8 was.",
   "animal_cash_reserve": 237.32823480882416,
   "crop_price_elasticity": 0.3169433640464623,
   "distance_penalty": 14.885370719575974,
