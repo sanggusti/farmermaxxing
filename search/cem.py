@@ -156,6 +156,7 @@ def modal_session():
 
 HOLDOUT_OFFSET = 10_000   # selection seeds: used to pick the champion
 CLEAN_OFFSET = 20_000     # reporting seeds: never used to optimise or select
+TRAIN_POOL = 1000         # training seeds rotate from [0, TRAIN_POOL) per gen
 
 # How far the champion's worst matchup may slip while its average improves.
 # Not zero: at these sample sizes the worst-opponent margin carries real noise,
@@ -191,7 +192,10 @@ def main():
     ap.add_argument("--generations", type=int, default=8)
     ap.add_argument("--population", type=int, default=24)
     ap.add_argument("--elite-frac", type=float, default=0.25)
-    ap.add_argument("--seeds", type=int, default=4, help="train seeds")
+    ap.add_argument("--seeds", type=int, default=4, help="train seeds per gen")
+    ap.add_argument("--train-pool", type=int, default=TRAIN_POOL,
+                    help="training seeds rotate from [0, pool) each generation. "
+                         "Must be < HOLDOUT_OFFSET (%(default)s)")
     ap.add_argument("--holdout-seeds", type=int, default=6,
                     help="disjoint seeds used to select the champion")
     ap.add_argument("--clean-seeds", type=int, default=8,
@@ -238,8 +242,15 @@ def main():
     if args.no_wandb:
         os.environ["WANDB_MODE"] = "disabled"
 
+    if args.train_pool >= HOLDOUT_OFFSET:
+        ap.error(f"--train-pool {args.train_pool} overlaps with holdout seeds "
+                 f"(HOLDOUT_OFFSET={HOLDOUT_OFFSET})")
+    if args.train_pool < args.seeds:
+        ap.error(f"--train-pool {args.train_pool} < --seeds {args.seeds}: "
+                 f"every generation would reuse seeds")
+
     rng = random.Random(args.rng_seed)
-    train_seeds = list(range(args.seeds))
+    # Train seeds rotate per generation; built inside the loop.
     holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
     clean_seeds = [CLEAN_OFFSET + i for i in range(args.clean_seeds)]
 
@@ -268,7 +279,7 @@ def main():
         print(f"held out of training: {heldout_labels}")
         print(f"training on         : {train_labels}")
 
-    train_cells = build_cells(train_opps, train_labels, train_seeds)
+    # train_cells built per generation inside the loop (seed rotation).
     holdout_cells = build_cells(ref_opps, ref_labels, holdout_seeds)
     clean_cells = build_cells(ref_opps, ref_labels, clean_seeds)
     if args.init_params:
@@ -298,12 +309,14 @@ def main():
     with backend_session, wandb_setup.start("cem", group=group, tags=["cem"], config={
         "generations": args.generations, "population": args.population,
         "elite_frac": args.elite_frac, "train_seeds": args.seeds,
+        "train_pool": args.train_pool,
         "holdout_seeds": args.holdout_seeds,
         "opponent": args.opponent,
         "fitness": args.fitness,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
-        "train_cells": len(train_cells), "holdout_cells": len(holdout_cells),
+        "train_cells_per_gen": len(train_opps) * args.seeds * 2,
+        "holdout_cells": len(holdout_cells),
         "backend": "modal" if args.modal else "local",
         "init_params": args.init_params or "defaults", "init_spread": spread,
     }) as run:
@@ -314,6 +327,13 @@ def main():
             population = [sample(mean, std, rng) for _ in range(args.population)]
             if gen == 0:
                 population[0] = flatten(base)
+
+            # Rotate training seeds each generation so the search cannot
+            # overfit a fixed seed set (issue #68, Vermetten et al. 2022).
+            # Common random numbers still hold WITHIN a generation.
+            train_seeds = [(gen * args.seeds + i) % args.train_pool
+                           for i in range(args.seeds)]
+            train_cells = build_cells(train_opps, train_labels, train_seeds)
 
             stats = score(population, train_cells, args.steps)
             # Rank on per-cell z-scores, not raw mean bank. With a mixed pool a
