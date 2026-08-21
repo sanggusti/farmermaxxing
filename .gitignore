@@ -7,6 +7,7 @@ submission.tar.gz
 wandb/
 .env
 runs/
+.kaggle-staging/
 
 # Ladder replays: ~28 MB each, fetched on demand by `python -m sim.ladder fetch`
 replays/ladder/

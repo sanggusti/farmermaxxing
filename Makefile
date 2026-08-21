@@ -7,7 +7,8 @@ BUNDLE := submission.tar.gz
 AGENT_FILES := main.py policy.py params.py market.py rules.py
 
 .PHONY: help setup play trace replay arena freeze promote gate test check \
-        search search-modal bundle submit check-engine leaderboard status clean \
+        search search-modal search-kaggle search-cma search-subspace \
+        bundle submit check-engine leaderboard status clean \
         ladder-sync calibrate slots meta-gap mix refresh-tapes preflight ledger
 
 help:  ## Show this help
@@ -94,6 +95,15 @@ search:  ## CEM locally (small; for smoke-testing the loop)
 
 search-modal:  ## CEM fanned out on Modal (the real run)
 	$(PY) -m search.cem --generations 10 --population 48 --seeds 6 --modal
+
+search-kaggle:  ## CEM on Kaggle notebook (free, ~40 min)
+	$(PY) -m search.cem --generations 10 --population 48 --seeds 6 --kaggle
+
+search-cma:  ## CMA-ES locally (small; for smoke-testing the loop)
+	$(PY) -m search.cmaes --generations 6 --seeds 2 --holdout-seeds 3 --clean-seeds 3
+
+search-subspace:  ## Random-subspace DFO locally (small; smoke test)
+	$(PY) -m search.subspace --iterations 4 --seeds 2 --holdout-seeds 3 --clean-seeds 3
 
 # ------------------------------------------------------------------ submission
 bundle: check  ## Build submission.tar.gz, then validate the archive itself

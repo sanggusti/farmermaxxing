@@ -97,11 +97,10 @@ def test_worst_opponent_tolerance_does_not_collapse_at_zero():
     rejected. A v7 run rejected 16 of its first 17 generations and returned its
     own starting point.
     """
-    from search.cem import WORST_TOLERANCE, WORST_TOLERANCE_FLOOR
+    from search.cem import worst_tolerance
 
     def bar(best_worst):
-        return best_worst - max(WORST_TOLERANCE * abs(best_worst),
-                                WORST_TOLERANCE_FLOOR)
+        return best_worst - worst_tolerance(best_worst)
 
     # At a tie, ordinary sampling noise must still get through.
     assert bar(0.0) < -1000, "a near-zero incumbent must not freeze the search"

@@ -10,6 +10,7 @@ dependencies = [
     "wandb>=0.28.1",
     "modal>=1.5.3",
     "kaggle>=1.7.0",
+    "cma==4.4.4",
 ]
 
 [dependency-groups]
