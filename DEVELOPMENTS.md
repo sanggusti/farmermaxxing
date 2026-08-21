@@ -943,3 +943,22 @@ subspace/arena runs keep their old panels — the accepted cost of renaming
 over aliasing. The new `diag/*` and `xover/*` keys are stable by
 construction (block names are a fixed set), so every diagnostic run lands
 on the same charts.
+
+**The diagnostic's verdict, same day** (`make search-kaggle EXP=bimodal-tpu`,
+group `cem-bimodal-diag`, wandb run dh680g1u; 48 elites/gen, `diag/
+underpowered` 0 in every generation, kernel wall 3,309s on the TPU tier):
+**the elite pool IS bimodal, and the split lives where `switches.py`
+hypothesised it would.** `fertilize` fired in 9 of 10 generations with
+delta_bic RISING over the run (27 -> 89, separation up to 5.65 against the
+3.0 artefact ceiling) -- the elites persistently hold two fertilize
+strategies and the Gaussian's mean sits between them, which also rhymes with
+the meta-gap: fertilizer is our 5x product deficit and the "cheapest fix",
+and the search cannot commit to either basin. Secondary: `land` fired 4/10,
+`targets` fired in g8-g9 with delta_bic rising to 64 (a late split forming);
+scattered single-generation fires elsewhere (distance g0, economy g4, labour
+g7/g9, prio g6/g7) are consistent with the measured ~sub-1% per-block noise
+and earn no weight. The crossover evidence gate is therefore OPEN:
+`crossover-tpu` and its `crossover_frac=0.0` control are the next TPU slots,
+paired via `search.restarts --cells`, with `xover/elite_children` as the
+survival readout and the fertilize blocks' delta_bic as the mechanism check
+(block donation should let elites commit to one basin).
