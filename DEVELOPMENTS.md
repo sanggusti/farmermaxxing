@@ -844,3 +844,15 @@ shape — implemented and tested above), #46 (multi-restart — shipped, v4
 promoted from it), #45 (slot hedge — v11 was the hedge), #30 (travel waste —
 refuted in docs/3), #9 (sell-next-day — premise wrong, and immaterial at ~9
 unsold units a season).
+
+**TPU-VM probe** (`make probe-tpu`, `runs/tpu-probe/probe.json`,
+https://wandb.ai/gustiwinata/farmermaxxing/runs/xgv1g6hn): the host advertises
+224 CPUs but the sandbox grants **96** (`sched_getaffinity`), with 378 GB RAM.
+A single fastplay episode runs 1.45s — the cores are NOT slower for this
+workload — and a full-width fork pool sustains **67.5 episodes/s, a 98x
+speedup** over single-process, ~24x the 4-core CPU kernel's throughput. A
+full CEM run (~51k episodes, ~4.7h on the CPU tier) would take **~13 minutes**
+of the TPU VM's ~20h/week quota; the observed cost is the queue (~9 minutes
+waiting for a TPU slot on this run, against 692s for the whole CPU-tier smoke).
+Migration is deliberately NOT part of #98 — it is its own change, and now its
+justification is a measurement instead of a spec sheet.
