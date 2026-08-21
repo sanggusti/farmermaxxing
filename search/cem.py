@@ -254,6 +254,110 @@ def worst_tolerance(best_worst):
 # search was ever allowed to chase.
 
 
+def finish_run(run, *, best_vec, best_holdout, best_train, fitness, score_fn,
+               clean_cells, steps, heldout_labels, run_dir, group, best_path):
+    """Everything after the last generation, shared by every search driver
+    (cem, cmaes, subspace -- issue #72 added two more) so the reporting
+    contract cannot drift between them: the ONE clean evaluation, the
+    selection-bias measurement, the wandb summary, clean_scores.json, and the
+    human report. Must be called inside the wandb context.
+
+    The clean evaluation happens exactly once, here. The difference against
+    the selection score IS the selection bias, so measure it rather than
+    arguing about whether it exists.
+    """
+    sel_key = "mean_margin" if fitness == "margin" else "mean_bank"
+    clean = None
+    if best_vec is not None:
+        clean = score_fn([best_vec], clean_cells, steps, metrics=True)[0]
+        run.summary["clean_bank"] = clean["mean_bank"]
+        run.summary["clean_min_bank"] = clean["min_bank"]
+        # Compare like with like. `best_holdout` is in the units the
+        # champion was SELECTED on, which under margin fitness is a margin,
+        # not a bank. Subtracting a bank from a margin produced a reported
+        # bias of -134% of the clean score on the v9 run -- a number with
+        # no meaning that still looked like a measurement.
+        clean_sel = selection_score(clean, sel_key)
+        run.summary["clean_selection_score"] = clean_sel
+        run.summary["selection_bias"] = best_holdout - clean_sel
+        for label, b in (clean.get("by_opponent") or {}).items():
+            run.summary[f"clean_vs/{label}/mean_bank"] = b["mean_bank"]
+            run.summary[f"clean_vs/{label}/win_rate"] = b["win_rate"]
+        for key in ARENA_CENSUS_KEYS:
+            if f"mean_{key}" in clean:
+                run.summary[f"clean_{key}"] = clean[f"mean_{key}"]
+        # Per-cell clean scores, for cross-restart comparison. Runs that
+        # share --reference and --clean-seeds produce aligned cell lists
+        # (build_cells order is deterministic and pinned by test_league),
+        # which is what `python -m search.restarts --cells a,b,...` needs
+        # to pair them: the T&T correction and the paired comparison both
+        # die without cell alignment. `banks`/`margins` are positional in
+        # clean_cells order, same contract as sim/gate.py's pairing.
+        clean_scores_path = os.path.join(run_dir, "clean_scores.json")
+        with open(clean_scores_path, "w") as f:
+            json.dump({
+                "group": group,
+                "selection_metric": sel_key,
+                "selection_score": best_holdout,
+                "clean_mean_bank": clean["mean_bank"],
+                "cell_labels": [[label, seed, seat]
+                                for _, label, seed, seat in clean_cells],
+                "clean_banks": clean["banks"],
+                "clean_margins": clean["margins"],
+            }, f, indent=1)
+
+    run.summary["best_holdout_bank"] = best_holdout
+    run.summary["best_train_bank"] = best_train
+    if best_vec is not None:
+        wandb_setup.log_params_artifact(
+            run, best_path, metadata={"holdout_mean_bank": best_holdout})
+
+    unit = "margin" if fitness == "margin" else "bank"
+    print(f"\nselection holdout : {best_holdout:>12,.0f}  (mean {unit} over "
+          f"the reference pool)")
+    if clean is not None:
+        bias = best_holdout - selection_score(clean, sel_key)
+        print(f"clean (unbiased)  : {clean['mean_bank']:>12,.0f}  "
+              f"worst {clean['min_bank']:,.0f}")
+        print("clean per opponent:")
+        held = set(heldout_labels)
+        for label, b in sorted((clean.get("by_opponent") or {}).items()):
+            mark = "h" if label in held else ("T" if held else " ")
+            print(f"  {mark} {label:<22} bank {b['mean_bank']:>11,.0f}   "
+                  f"win {b['win_rate']:>6.1%}   "
+                  f"margin {b.get('mean_margin', float('nan')):>+11,.0f}")
+        if held:
+            by_opp = clean.get("by_opponent") or {}
+            t = [b for l, b in by_opp.items() if l not in held]
+            h = [b for l, b in by_opp.items() if l in held]
+            if t and h:
+                tm = statistics.mean([b["mean_margin"] for b in t])
+                hm = statistics.mean([b["mean_margin"] for b in h])
+                tw = statistics.mean([b["win_rate"] for b in t])
+                hw = statistics.mean([b["win_rate"] for b in h])
+                print(f"  (T = trained against, h = held out)")
+                print(f"\ntrained-on margin : {tm:>+12,.0f}  win {tw:>6.1%}")
+                print(f"held-out  margin  : {hm:>+12,.0f}  win {hw:>6.1%}")
+                print(f"memorisation gap  : {tm - hm:>+12,.0f}")
+                if tm - hm > 5_000:
+                    print("  WARNING: the candidate is markedly better against the "
+                          "opponents it\n  trained on than against the ones it did "
+                          "not. That gap is the part of\n  the improvement that will "
+                          "not appear on the ladder.")
+        clean_sel = selection_score(clean, sel_key)
+        pct = f"{bias / abs(clean_sel):+.1%}" if clean_sel else "n/a"
+        print(f"selection bias    : {bias:>+12,.0f}  ({pct} of the clean mean "
+              f"{unit}, which is what the champion was selected on)")
+        print("\nQuote the clean number. The selection score is what the search")
+        print("optimised toward and is biased upward by construction.")
+    print(f"\n{best_path}")
+    print(f"promote with:  make promote FROM={best_path}")
+    if clean is not None:
+        print(f"compare restarts with:  python -m search.restarts "
+              f"--cells {os.path.join(run_dir, 'clean_scores.json')},<other runs>")
+    return clean
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--generations", type=int, default=8)
@@ -542,97 +646,11 @@ def main():
                   f"worst {worst_label} {worst_margin:>+10,.0f}"
                   + ("  [rejected: worst regressed]" if regressed else ""))
 
-        # One evaluation on seeds the search never saw. The difference against
-        # the selection score IS the selection bias, so measure it rather than
-        # arguing about whether it exists.
-        clean = None
-        if best_vec is not None:
-            clean = score([best_vec], clean_cells, args.steps, metrics=True)[0]
-            run.summary["clean_bank"] = clean["mean_bank"]
-            run.summary["clean_min_bank"] = clean["min_bank"]
-            # Compare like with like. `best_holdout` is in the units the
-            # champion was SELECTED on, which under margin fitness is a margin,
-            # not a bank. Subtracting a bank from a margin produced a reported
-            # bias of -134% of the clean score on the v9 run -- a number with
-            # no meaning that still looked like a measurement.
-            clean_sel = selection_score(clean, sel_key)
-            run.summary["clean_selection_score"] = clean_sel
-            run.summary["selection_bias"] = best_holdout - clean_sel
-            for label, b in (clean.get("by_opponent") or {}).items():
-                run.summary[f"clean_vs/{label}/mean_bank"] = b["mean_bank"]
-                run.summary[f"clean_vs/{label}/win_rate"] = b["win_rate"]
-            for key in ARENA_CENSUS_KEYS:
-                if f"mean_{key}" in clean:
-                    run.summary[f"clean_{key}"] = clean[f"mean_{key}"]
-            # Per-cell clean scores, for cross-restart comparison. Runs that
-            # share --reference and --clean-seeds produce aligned cell lists
-            # (build_cells order is deterministic and pinned by test_league),
-            # which is what `python -m search.restarts --cells a,b,...` needs
-            # to pair them: the T&T correction and the paired comparison both
-            # die without cell alignment. `banks`/`margins` are positional in
-            # clean_cells order, same contract as sim/gate.py's pairing.
-            clean_scores_path = os.path.join(run_dir, "clean_scores.json")
-            with open(clean_scores_path, "w") as f:
-                json.dump({
-                    "group": group,
-                    "selection_metric": sel_key,
-                    "selection_score": best_holdout,
-                    "clean_mean_bank": clean["mean_bank"],
-                    "cell_labels": [[label, seed, seat]
-                                    for _, label, seed, seat in clean_cells],
-                    "clean_banks": clean["banks"],
-                    "clean_margins": clean["margins"],
-                }, f, indent=1)
-
-        run.summary["best_holdout_bank"] = best_holdout
-        run.summary["best_train_bank"] = best_train
-        if best_vec is not None:
-            wandb_setup.log_params_artifact(
-                run, best_path, metadata={"holdout_mean_bank": best_holdout})
-
-    unit = "margin" if args.fitness == "margin" else "bank"
-    print(f"\nselection holdout : {best_holdout:>12,.0f}  (mean {unit} over "
-          f"the reference pool)")
-    if clean is not None:
-        bias = best_holdout - selection_score(clean, sel_key)
-        print(f"clean (unbiased)  : {clean['mean_bank']:>12,.0f}  "
-              f"worst {clean['min_bank']:,.0f}")
-        print("clean per opponent:")
-        held = set(heldout_labels)
-        for label, b in sorted((clean.get("by_opponent") or {}).items()):
-            mark = "h" if label in held else ("T" if held else " ")
-            print(f"  {mark} {label:<22} bank {b['mean_bank']:>11,.0f}   "
-                  f"win {b['win_rate']:>6.1%}   "
-                  f"margin {b.get('mean_margin', float('nan')):>+11,.0f}")
-        if held:
-            by_opp = clean.get("by_opponent") or {}
-            t = [b for l, b in by_opp.items() if l not in held]
-            h = [b for l, b in by_opp.items() if l in held]
-            if t and h:
-                tm = statistics.mean([b["mean_margin"] for b in t])
-                hm = statistics.mean([b["mean_margin"] for b in h])
-                tw = statistics.mean([b["win_rate"] for b in t])
-                hw = statistics.mean([b["win_rate"] for b in h])
-                print(f"  (T = trained against, h = held out)")
-                print(f"\ntrained-on margin : {tm:>+12,.0f}  win {tw:>6.1%}")
-                print(f"held-out  margin  : {hm:>+12,.0f}  win {hw:>6.1%}")
-                print(f"memorisation gap  : {tm - hm:>+12,.0f}")
-                if tm - hm > 5_000:
-                    print("  WARNING: the candidate is markedly better against the "
-                          "opponents it\n  trained on than against the ones it did "
-                          "not. That gap is the part of\n  the improvement that will "
-                          "not appear on the ladder.")
-        clean_sel = selection_score(clean, sel_key)
-        pct = f"{bias / abs(clean_sel):+.1%}" if clean_sel else "n/a"
-        print(f"selection bias    : {bias:>+12,.0f}  ({pct} of the clean mean "
-              f"{unit}, which is what the champion was selected on)")
-        print("\nQuote the clean number. The selection score is what the search")
-        print("optimised toward and is biased upward by construction.")
-    print(f"\n{best_path}")
-    print(f"promote with:  make promote FROM={best_path}")
-    if clean is not None:
-        print(f"compare restarts with:  python -m search.restarts "
-              f"--cells {os.path.join(run_dir, 'clean_scores.json')},<other runs>")
+        finish_run(run, best_vec=best_vec, best_holdout=best_holdout,
+                   best_train=best_train, fitness=args.fitness, score_fn=score,
+                   clean_cells=clean_cells, steps=args.steps,
+                   heldout_labels=heldout_labels, run_dir=run_dir, group=group,
+                   best_path=best_path)
 
 
 if __name__ == "__main__":
