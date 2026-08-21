@@ -688,3 +688,83 @@ what the ladder says.** See `AGENTS.md` for the operating rules.
   We use 0.03% of the per-turn budget. **Its first step is still a probe
   submission** testing whether `kaggle_environments` imports inside the
   submission sandbox, which would allow exact rollouts.
+
+### 2026-08-21, the search-methodology backlog lands (issue #72)
+
+Five budget-neutral upgrades from the optimiser literature review, in PR #96
+(stacked on #95). Same ~250k-episode spend as v12's run, more information out
+of it. The issue's dimensions were stale: the space is now **60 dims (24
+integer + 36 float)**, not 45/17, so every derived constant below uses 60.
+
+**1. Geometric sample-size ramp** (`--ramp` on `search.cem`). Episodes per
+candidate were constant across a run; Retrospective Approximation says early
+generations separating wildly different candidates need almost none of that
+precision and late generations separating near-identical ones need most of it.
+`ramp_schedule()` produces a geometric schedule whose sum equals
+`generations * seeds` **exactly** (repaired one seed at a time under
+non-decreasing / >=1 invariants), so a ramped run and its constant control
+cost identical episodes. At `--generations 40 --seeds 4 --ramp 8` the
+schedule runs 1,1,...,8,10 — the issue's 4/12/32/48 shape at the current
+episode multiplier. `--ramp 1.0` reproduces the legacy rotation bit-for-bit;
+refused under `--kaggle` because `kaggle_nb.py` rebuilds its config from args
+and would drop the flag silently (rule 7).
+
+**2. Kleywegt's restart stopping rule** (`search/restarts.py`). For
+exchangeable restarts, P(restart M+1 beats the best of M) = 1/(M+1). Applied
+retrospectively to the five-restart archetype sweep: a sixth start had a 1/6
+chance of winning. The companion number: `best over R restarts` is inflated
+by ~E[max of R std normals] x SEM — 1.42 at R=8 — so restart counts must be
+held fixed across compared arms.
+
+**3. Tibshirani & Tibshirani (AOAS 2009) selected-max correction** (same
+module). Folds are the shared clean cells, arms are the restarts; the bias
+estimate is the mean per-cell gap between the per-cell best arm and the
+overall winner. Measured on synthetic tied arms (truth 100, sigma 10, 40
+cells): naive 101.3, corrected 91.3 — **conservative**, because the per-cell
+gap is driven by single-episode noise (~9,500 coins), so quote corrected and
+naive as floor and ceiling. Every driver now writes
+`runs/<group>/clean_scores.json` (per-cell clean banks/margins, cell labels)
+so `python -m search.restarts --cells a,b,...` can pair runs; it refuses
+misaligned cells.
+
+**4. Random-subspace quadratic DFO** (`search/subspace.py`, Cartis & Roberts
+2024). Fits a full quadratic in a random orthonormal 5-D subspace — 21
+coefficients against 1,830 for the full 60-D covariance — from the classic
+21-point unisolvent design, then takes a trust-region step, accepting or
+rejecting on holdout with the shared worst-opponent guard. This is the only
+tool in the box that can see cross-curvature along the diagonal flat
+directions (all 11 `prio_*` moving together) without paying full-covariance
+cost. Geometry is in a unit cube; integer dims ride as floats and round at
+`unflatten` — accepted for v1. numpy is used driver-side only (already in the
+venv via `cma`); workers and the Modal image are untouched.
+
+**5. CMA-ES at its own population** (`search/cmaes.py`). #70 rejected CMA-ES
+assuming CEM's population 384; CMA-ES's own default is lambda = 4 +
+floor(3 ln 60) = **16**, so the same budget buys ~600 generations of
+covariance adaptation instead of 40 — and #69 measured us
+generation-starved, not population-starved. Three mechanisms resolved
+against pycma 4.4.4's source, *against* the issue's unit-cube prescription:
+raw parameter scale (the integer machinery — minstd ~0.2, integer centering,
+rounded `ask()` — assumes integer spacing 1 in the sampled coordinates, which
+a unit cube breaks), `CMA_stds` carrying the per-dimension scale
+normalisation instead, and `bounds` -> BoundTransform replacing the silent
+clip in `unflatten` as the optimiser's view of the box. One measured trap
+pinned by test: with `integer_variables` set and popsize unset, cma silently
+overrides popsize to 27 at (60, 24) — a 69% per-generation budget increase
+that would never raise. The readout to watch is `axis_ratio`
+(max(es.D)/min(es.D)): if it never leaves ~1, 600 generations of covariance
+bought nothing a diagonal did not have.
+
+**6. Crossover: answered, negative — recorded in the issue.** SBX/BLX-alpha
+are coordinate-wise, the flat directions are diagonals, and crossover between
+two bound-pinned parents manufactures a behaviourally-identical child whose
+fresh noisy score makes population-best rise with zero underlying change. Not
+re-proposed without new evidence.
+
+Shared plumbing extracted so three drivers cannot drift: `finish_run()` (the
+one clean evaluation, selection-bias measurement, wandb summary,
+clean_scores.json, human report) and `worst_tolerance()` (the absolute
+tolerance + floor). All drivers keep the invariants: common random numbers
+within a generation, rotating train seeds, holdout selection, clean touched
+once, incumbent guarantee (cmaes and subspace holdout-score the warm start
+up front, so neither can report worse than it started).
