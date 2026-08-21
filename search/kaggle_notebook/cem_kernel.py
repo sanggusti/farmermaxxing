@@ -31,14 +31,40 @@ subprocess.check_call([
 # ---------------------------------------------------------------------------
 # 2. Locate the code from the dataset
 # ---------------------------------------------------------------------------
-# Kaggle auto-extracts .tar.gz uploads into a subdirectory named after the
-# archive (minus the extension). So code.tar.gz becomes code/.
+# Kaggle auto-extracts .tar.gz uploads. The extracted tree may live directly
+# under the dataset mount, under a code/ subdirectory, or the tarball may
+# still be present as-is. Try all three.
 DATASET = "/kaggle/input/farmermaxxing-cem-code"
-CODE = os.path.join(DATASET, "code")
-if not os.path.isdir(CODE):
-    # Fallback: try extracting manually (in case Kaggle changes behaviour)
+
+# Debug: show what's actually in the mount
+print("dataset mount contents:")
+for root, dirs, files in os.walk(DATASET):
+    depth = root.replace(DATASET, "").count(os.sep)
+    if depth <= 2:  # don't recurse too deep
+        indent = "  " * depth
+        print(f"{indent}{os.path.basename(root)}/")
+        if depth < 2:
+            for f in files[:10]:
+                print(f"{indent}  {f}")
+
+CODE = None
+# Option 1: auto-extracted into code/ subdirectory
+if os.path.isdir(os.path.join(DATASET, "code", "agent")):
+    CODE = os.path.join(DATASET, "code")
+# Option 2: extracted flat into the dataset root
+elif os.path.isdir(os.path.join(DATASET, "agent")):
+    CODE = DATASET
+# Option 3: tarball still present, extract manually
+elif os.path.isfile(os.path.join(DATASET, "code.tar.gz")):
     CODE = "/tmp/fm"
     tarfile.open(os.path.join(DATASET, "code.tar.gz")).extractall(CODE)
+else:
+    raise FileNotFoundError(
+        f"Cannot find code in {DATASET}. Contents: "
+        f"{os.listdir(DATASET)}"
+    )
+
+print(f"using CODE={CODE}")
 sys.path[:0] = [CODE, os.path.join(CODE, "agent")]
 os.environ["WANDB_MODE"] = "disabled"
 

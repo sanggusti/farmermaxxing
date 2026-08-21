@@ -6,21 +6,16 @@ takes about 40 minutes — well within limits, and $0.
 
     python -m search.cem --kaggle --generations 10 --population 48 --seeds 6
 
-Data flow:
-  1. Package agent/, sim/, obs/, search/ into a tarball
-  2. Upload as a Kaggle dataset version alongside cem_config.json
-  3. Push a kernel script that extracts the tarball and runs the CEM loop
-  4. Poll until complete
-  5. Download best_params.json, results.json, generations.jsonl
+The kernel script is generated dynamically with all code and configuration
+embedded as a base64-encoded tarball. No separate dataset needed — everything
+travels in one self-extracting script.
 
-One-time setup (run once before first use):
-
-    python -m search.kaggle_nb --setup
-
-This creates the private dataset `sanggusti/farmermaxxing-cem-code` on Kaggle.
+One-time setup is no longer required.
 """
 
 import argparse
+import base64
+import io
 import json
 import os
 import shutil
@@ -32,11 +27,7 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNS_DIR = os.path.join(REPO, "runs")
 STAGING_DIR = os.path.join(REPO, ".kaggle-staging")
-KERNEL_DIR = os.path.join(os.path.dirname(__file__), "kaggle_notebook")
 
-# These are fixed after one-time setup. The username is read from the Kaggle
-# CLI config; the slugs follow Kaggle's naming convention.
-DATASET_SLUG_SUFFIX = "farmermaxxing-cem-code"
 KERNEL_SLUG_SUFFIX = "farmermaxxing-cem-search"
 
 
@@ -52,62 +43,13 @@ def _kaggle_username():
     raise RuntimeError("Could not determine Kaggle username from `kaggle config view`")
 
 
-def _dataset_slug(username):
-    return f"{username}/{DATASET_SLUG_SUFFIX}"
-
-
 def _kernel_slug(username):
     return f"{username}/{KERNEL_SLUG_SUFFIX}"
 
 
 # ---------------------------------------------------------------------------
-# One-time setup
+# Packaging — build a self-extracting kernel script
 # ---------------------------------------------------------------------------
-
-def setup_dataset(username):
-    """Create the private dataset on Kaggle (run once)."""
-    os.makedirs(STAGING_DIR, exist_ok=True)
-
-    meta = {
-        "title": "farmermaxxing CEM code",
-        "id": _dataset_slug(username),
-        "licenses": [{"name": "CC0-1.0"}],
-    }
-    meta_path = os.path.join(STAGING_DIR, "dataset-metadata.json")
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-
-    # Write a placeholder file so the dataset has something to upload
-    placeholder = os.path.join(STAGING_DIR, "README.md")
-    with open(placeholder, "w") as f:
-        f.write("# farmermaxxing CEM code\n\nCode transport for Kaggle CEM runs.\n")
-
-    subprocess.run(
-        ["kaggle", "datasets", "create", "-p", STAGING_DIR],
-        check=True,
-    )
-    print(f"dataset created: {_dataset_slug(username)}")
-    print("you can now run: make search-kaggle")
-
-
-# ---------------------------------------------------------------------------
-# Packaging
-# ---------------------------------------------------------------------------
-
-def _clean_staging():
-    """Remove everything in the staging directory except dataset-metadata.json."""
-    if not os.path.isdir(STAGING_DIR):
-        os.makedirs(STAGING_DIR)
-        return
-    for name in os.listdir(STAGING_DIR):
-        if name == "dataset-metadata.json":
-            continue
-        path = os.path.join(STAGING_DIR, name)
-        if os.path.isdir(path):
-            shutil.rmtree(path)
-        else:
-            os.remove(path)
-
 
 def _pycache_filter(tarinfo):
     """Exclude __pycache__ and .pyc from the tarball."""
@@ -116,18 +58,14 @@ def _pycache_filter(tarinfo):
     return tarinfo
 
 
-def package_and_upload(config_dict, username):
-    """Package code + config into the Kaggle dataset and upload a new version.
+def _build_tarball_bytes(config_dict):
+    """Build an in-memory tarball of the code + config.
 
-    The tarball contains agent/, sim/, obs/, and selected search/ files. The
-    cem_config.json sits alongside the tarball (not inside it) so it survives
-    Kaggle's --dir-mode skip without extraction.
+    Returns the gzipped bytes. The tarball contains agent/, sim/, obs/,
+    selected search/ files, and cem_config.json.
     """
-    _clean_staging()
-
-    # Build the code tarball
-    tarball_path = os.path.join(STAGING_DIR, "code.tar.gz")
-    with tarfile.open(tarball_path, "w:gz") as tar:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for dirname in ("agent", "sim", "obs"):
             src = os.path.join(REPO, dirname)
             tar.add(src, arcname=dirname, filter=_pycache_filter)
@@ -138,74 +76,108 @@ def package_and_upload(config_dict, username):
                 tar.add(src, arcname=f"search/{fname}",
                         filter=_pycache_filter)
         # search/__init__.py so `from search.xxx import` works
-        init_path = os.path.join(STAGING_DIR, "__search_init__.py")
-        with open(init_path, "w") as f:
-            f.write("")
-        tar.add(init_path, arcname="search/__init__.py")
-        os.remove(init_path)
+        init_data = b""
+        info = tarfile.TarInfo(name="search/__init__.py")
+        info.size = 0
+        tar.addfile(info, io.BytesIO(init_data))
 
-    # Write the config
-    config_path = os.path.join(STAGING_DIR, "cem_config.json")
-    with open(config_path, "w") as f:
-        json.dump(config_dict, f, indent=2)
+        # Embed cem_config.json in the tarball
+        config_bytes = json.dumps(config_dict, indent=2).encode()
+        info = tarfile.TarInfo(name="cem_config.json")
+        info.size = len(config_bytes)
+        tar.addfile(info, io.BytesIO(config_bytes))
 
-    # Ensure dataset-metadata.json exists
-    meta_path = os.path.join(STAGING_DIR, "dataset-metadata.json")
-    if not os.path.exists(meta_path):
-        raise FileNotFoundError(
-            f"{meta_path} not found. Run `python -m search.kaggle_nb --setup` first."
-        )
-
-    # Upload
-    group = config_dict.get("group", "cem-kaggle")
-    subprocess.run(
-        ["kaggle", "datasets", "version", "-p", STAGING_DIR,
-         "-m", f"CEM run {group}", "--dir-mode", "skip"],
-        check=True,
-    )
-    print(f"dataset version uploaded: {_dataset_slug(username)}")
+    return buf.getvalue()
 
 
-def _wait_for_dataset(username, timeout=120):
-    """Poll until the dataset version is ready (processed)."""
-    slug = _dataset_slug(username)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        result = subprocess.run(
-            ["kaggle", "datasets", "status", slug],
-            capture_output=True, text=True,
-        )
-        output = result.stdout.strip().lower()
-        if "ready" in output or "error" in output:
-            return output
-        time.sleep(5)
-    return "timeout"
+def _generate_kernel_script(tarball_b64):
+    """Generate a self-extracting kernel script.
+
+    The script embeds the tarball as base64, extracts it to /tmp/fm,
+    then runs the CEM loop.
+    """
+    # Read the CEM kernel template
+    template_path = os.path.join(
+        os.path.dirname(__file__), "kaggle_notebook", "cem_kernel.py")
+    with open(template_path) as f:
+        template = f.read()
+
+    # Build the self-extracting preamble
+    preamble = f'''#!/usr/bin/env python3
+"""Auto-generated CEM search script for Kaggle. Do not edit directly."""
+
+import base64
+import io
+import json
+import os
+import random
+import statistics
+import subprocess
+import sys
+import tarfile
+import time
+
+# Install the pinned engine version
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install",
+    "kaggle-environments==1.32.4", "-q", "--disable-pip-version-check",
+])
+
+# Extract embedded code
+_PAYLOAD = """{tarball_b64}"""
+
+CODE = "/tmp/fm"
+os.makedirs(CODE, exist_ok=True)
+tarfile.open(fileobj=io.BytesIO(base64.b64decode(_PAYLOAD)), mode="r:gz").extractall(CODE)
+sys.path[:0] = [CODE, os.path.join(CODE, "agent")]
+os.environ["WANDB_MODE"] = "disabled"
+
+print(f"code extracted to {{CODE}}")
+print(f"agent files: {{os.listdir(os.path.join(CODE, 'agent'))}}")
+
+# Load configuration from the tarball
+with open(os.path.join(CODE, "cem_config.json")) as f:
+    cfg = json.load(f)
+
+'''
+
+    # Now append the imports + CEM loop from the template. Skip everything
+    # up to the "4. Imports" section.
+    marker = "# 4. Imports (after sys.path is set)"
+    idx = template.find(marker)
+    if idx == -1:
+        raise ValueError("Cannot find imports marker in cem_kernel.py template")
+    # Get everything from imports onward
+    rest = template[idx:]
+
+    return preamble + rest
 
 
 # ---------------------------------------------------------------------------
 # Kernel push / poll / download
 # ---------------------------------------------------------------------------
 
-def push_kernel(username):
-    """Write kernel-metadata.json and push the kernel script."""
+def push_kernel(username, script_content):
+    """Write the generated kernel script and push it."""
     kernel_staging = os.path.join(STAGING_DIR, "kernel")
     os.makedirs(kernel_staging, exist_ok=True)
 
-    # Copy the kernel script
-    src = os.path.join(KERNEL_DIR, "cem_kernel.py")
-    shutil.copy2(src, os.path.join(kernel_staging, "cem_kernel.py"))
+    # Write the generated script
+    script_path = os.path.join(kernel_staging, "cem_kernel.py")
+    with open(script_path, "w") as f:
+        f.write(script_content)
 
-    # Write kernel metadata
+    # Write kernel metadata — no dataset sources needed
     meta = {
         "id": _kernel_slug(username),
-        "title": "farmermaxxing CEM search",
+        "title": "farmermaxxing cem search",
         "code_file": "cem_kernel.py",
         "language": "python",
         "kernel_type": "script",
         "is_private": "true",
         "enable_gpu": "false",
         "enable_internet": "true",
-        "dataset_sources": [_dataset_slug(username)],
+        "dataset_sources": [],
         "competition_sources": [],
         "kernel_sources": [],
     }
@@ -218,8 +190,9 @@ def push_kernel(username):
     )
     if result.returncode != 0:
         stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
         # 409 means a previous version is still running/error; retry after wait
-        if "409" in stderr or "Conflict" in stderr:
+        if "409" in stderr or "Conflict" in stderr or "409" in stdout:
             print("previous kernel version still active, waiting 30s and retrying...")
             time.sleep(30)
             subprocess.run(
@@ -227,19 +200,14 @@ def push_kernel(username):
                 check=True,
             )
         else:
-            print(f"kernel push failed: {stderr}")
-            print(result.stdout)
+            print(f"kernel push failed:\n  stdout: {stdout}\n  stderr: {stderr}")
             raise subprocess.CalledProcessError(result.returncode,
-                                                result.args, result.stdout, stderr)
+                                                result.args, stdout, stderr)
     print(f"kernel pushed: {_kernel_slug(username)}")
 
 
 def poll(username, interval=30, timeout=7200):
-    """Poll kernel status until completion or timeout.
-
-    Returns the final status string: 'complete', 'error', 'cancelAcknowledged',
-    or 'timeout'.
-    """
+    """Poll kernel status until completion or timeout."""
     slug = _kernel_slug(username)
     deadline = time.time() + timeout
     last_status = None
@@ -251,17 +219,15 @@ def poll(username, interval=30, timeout=7200):
         )
         output = result.stdout.strip().lower()
 
-        # Parse status from output like "has status 'running'"
-        status = output
         for terminal in ("complete", "error", "cancelacknowledged"):
             if terminal in output:
                 elapsed = time.time() - (deadline - timeout)
                 print(f"\nkernel {terminal} after {elapsed:.0f}s")
                 return terminal
 
-        if status != last_status:
-            print(f"\nkernel status: {status}")
-            last_status = status
+        if output != last_status:
+            print(f"\nkernel status: {output}")
+            last_status = output
         else:
             print(".", end="", flush=True)
 
@@ -272,10 +238,7 @@ def poll(username, interval=30, timeout=7200):
 
 
 def download(username, run_dir):
-    """Download kernel output to the run directory.
-
-    Returns the path to best_params.json, or None if not found.
-    """
+    """Download kernel output to the run directory."""
     os.makedirs(run_dir, exist_ok=True)
     slug = _kernel_slug(username)
 
@@ -286,13 +249,12 @@ def download(username, run_dir):
 
     best_path = os.path.join(run_dir, "best_params.json")
     if os.path.exists(best_path):
-        # Validate it's parseable
         with open(best_path) as f:
-            json.load(f)
+            json.load(f)  # validate
         return best_path
 
     print("WARNING: best_params.json not found in kernel output")
-    print(f"  check: kaggle kernels output {slug}")
+    print(f"  files downloaded: {os.listdir(run_dir)}")
     return None
 
 
@@ -316,7 +278,6 @@ def log_results_to_wandb(run_dir, group, config):
                     row = json.loads(line)
                     run.log(row)
 
-        # Summary
         run.summary["best_holdout_bank"] = results.get("best_holdout")
         run.summary["best_train_bank"] = results.get("best_train")
         if results.get("clean_bank") is not None:
@@ -343,7 +304,6 @@ def run_cem_on_kaggle(args):
     """Package, push, poll, download — the full Kaggle CEM workflow."""
     username = _kaggle_username()
 
-    # Build the config dict from the argparse namespace
     config = {
         "generations": args.generations,
         "population": args.population,
@@ -379,31 +339,29 @@ def run_cem_on_kaggle(args):
     print(f"  opponents:   {config['opponents']}")
     print()
 
-    # Step 1: Package and upload
-    print("packaging code and config...")
-    package_and_upload(config, username)
+    # Step 1: Build the self-extracting kernel script
+    print("building kernel script with embedded code...")
+    tarball_bytes = _build_tarball_bytes(config)
+    tarball_b64 = base64.b64encode(tarball_bytes).decode()
+    script = _generate_kernel_script(tarball_b64)
+    print(f"  tarball: {len(tarball_bytes):,} bytes")
+    print(f"  script:  {len(script):,} chars")
 
-    # Step 2: Wait for dataset to be ready
-    print("waiting for dataset processing...")
-    ds_status = _wait_for_dataset(username)
-    if "error" in str(ds_status):
-        print(f"dataset processing failed: {ds_status}")
-        sys.exit(1)
-
-    # Step 3: Push the kernel
+    # Step 2: Push
+    os.makedirs(STAGING_DIR, exist_ok=True)
     print("pushing kernel...")
-    push_kernel(username)
+    push_kernel(username, script)
 
-    # Step 4: Poll until done
+    # Step 3: Poll until done
     print(f"polling (timeout 2h, interval 30s)...")
     status = poll(username, interval=30, timeout=7200)
 
     if status != "complete":
         print(f"kernel did not complete: {status}")
-        print(f"  check: kaggle kernels status {_kernel_slug(username)}")
+        print(f"  check logs: kaggle kernels output {_kernel_slug(username)}")
         sys.exit(1)
 
-    # Step 5: Download results
+    # Step 4: Download results
     print("downloading results...")
     best_path = download(username, run_dir)
 
@@ -411,7 +369,6 @@ def run_cem_on_kaggle(args):
         print(f"\nbest_params.json: {best_path}")
         print(f"promote with:  make promote FROM={best_path}")
 
-        # Show results summary
         results_path = os.path.join(run_dir, "results.json")
         if os.path.exists(results_path):
             with open(results_path) as f:
@@ -421,7 +378,7 @@ def run_cem_on_kaggle(args):
                 print(f"clean:   {results['clean_bank']:,.0f}")
             print(f"wall:    {results.get('wall_seconds', 0):.0f}s")
 
-    # Step 6: Log to W&B (unless --no-wandb)
+    # Step 5: Log to W&B (unless --no-wandb)
     if not args.no_wandb:
         results_path = os.path.join(run_dir, "results.json")
         if os.path.exists(results_path):
@@ -430,17 +387,24 @@ def run_cem_on_kaggle(args):
 
 
 # ---------------------------------------------------------------------------
-# CLI for setup
+# CLI
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Kaggle notebook CEM setup")
-    ap.add_argument("--setup", action="store_true",
-                    help="one-time: create the private dataset on Kaggle")
+    ap = argparse.ArgumentParser(description="Kaggle notebook CEM backend")
+    ap.add_argument("--test-package", action="store_true",
+                    help="build the script and print its size, but don't push")
     args = ap.parse_args()
 
-    if args.setup:
-        username = _kaggle_username()
-        setup_dataset(username)
+    if args.test_package:
+        config = {"generations": 1, "population": 4, "seeds": 1,
+                  "opponents": "starter", "group": "test"}
+        tb = _build_tarball_bytes(config)
+        b64 = base64.b64encode(tb).decode()
+        script = _generate_kernel_script(b64)
+        print(f"tarball: {len(tb):,} bytes")
+        print(f"base64:  {len(b64):,} chars")
+        print(f"script:  {len(script):,} chars")
+        print(f"script size: {len(script.encode()):,} bytes")
     else:
         ap.print_help()
