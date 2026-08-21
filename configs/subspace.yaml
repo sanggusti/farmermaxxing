@@ -1,0 +1,20 @@
+# python -m search.subspace [key=value ...] [+experiment=<name>]
+defaults:
+  - search_common
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+iterations: 20        # one subspace model per iteration
+dim: 5                # subspace dimension p; design costs (p+1)(p+2)/2 per iter
+radius: 0.1           # initial trust-region radius in unit-cube units
+# Random in-ball design points beyond the 21, making the fit properly
+# least-squares; the dial to turn if per-iteration acceptance thrashes on noise.
+extra_points: 0
+seeds: 2
+rng_seed: 1
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

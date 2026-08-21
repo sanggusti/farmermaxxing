@@ -1,0 +1,29 @@
+# python -m sim.gate [key=value ...]     (make gate wraps this)
+defaults:
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+candidate: agent/params.json
+# params.json to beat; null -> the snapshot named in the CHAMPION file at the
+# repo root. NOT Params() defaults: that comparison passes trivially.
+champion: null
+# Pool spec (top|band|real|frozen|all|names). Defaults to `top`, the prize
+# band -- see sim.opponents. Was the Makefile's POOL fallback; one home now.
+opponents: top
+# Comma-separated opponent labels the candidate was SEARCHED against. The
+# rest of the pool becomes a held-out subset and gets its own check.
+trained_on: null
+seeds: 8
+steps: 720
+margin_sigmas: 1.0
+floor_tolerance: 0.10
+# Judge on the seeds used to select (biased; for measuring that bias, not
+# for promotion decisions).
+on_selection_seeds: false
+wandb: false
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

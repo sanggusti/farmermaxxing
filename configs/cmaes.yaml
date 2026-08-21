@@ -1,0 +1,24 @@
+# python -m search.cmaes [key=value ...] [+experiment=<name>]
+defaults:
+  - search_common
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+generations: 40
+# lambda; 0 means CMA-ES's own default 4 + floor(3 ln n) = 16 at n=60 --
+# NOT cma's integer-variables override of 27 (see search/cmaes.py docstring).
+popsize: 0
+seeds: 2
+# Holdout-score the generation's train-best every N generations. At 600
+# generations, every generation would spend more episodes selecting than
+# training; every 8th keeps selection under a quarter of the budget.
+holdout_every: 8
+# Seeds both the opponent hold-out draw and cma. Default 1, never 0: cma
+# treats a falsy seed as "use the clock", which makes runs unreproducible.
+rng_seed: 1
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

@@ -22,6 +22,18 @@ from search.kaggle_nb import (  # noqa: E402
     _generate_kernel_script,
     _pycache_filter,
 )
+from search.kernel_config import KNOWN_KEYS, resolve_cem_config  # noqa: E402
+
+CONFIGS = os.path.join(REPO, "configs")
+
+
+def composed_cem_config(*overrides):
+    """The real composed configs/cem.yaml as a plain dict."""
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
+    with initialize_config_dir(config_dir=CONFIGS, version_base=None):
+        cfg = compose(config_name="cem", overrides=list(overrides))
+    return OmegaConf.to_container(cfg, resolve=True)
 
 
 class TestPackaging:
@@ -60,6 +72,7 @@ class TestPackaging:
         # Search helpers
         assert "search/cem.py" in names
         assert "search/league.py" in names
+        assert "search/kernel_config.py" in names
         assert "search/__init__.py" in names
 
         # Config
@@ -107,21 +120,51 @@ class TestScriptGeneration:
 
 
 class TestConfigSerialisation:
-    """Verify config roundtrips correctly."""
+    """Verify config roundtrips correctly, and that the yaml surface and the
+    kernel's KNOWN_KEYS cannot drift apart silently -- the predecessor of this
+    transport hand-copied args into a dict and dropped an untaught flag
+    (--ramp) WITHOUT ERROR."""
+
+    @staticmethod
+    def _apply_driver_transforms(config):
+        """The key transforms run_cem_on_kaggle applies before shipping."""
+        config = dict(config)
+        config.pop("backend")
+        config["group"] = config["group"] or "cem-test"
+        if config.pop("init_params"):
+            config["init_params_data"] = {}
+        return config
 
     def test_basic_roundtrip(self):
-        config = {
-            "generations": 10, "population": 48, "elite_frac": 0.25,
-            "seeds": 6, "train_pool": 1000, "holdout_seeds": 6,
-            "clean_seeds": 8, "steps": 720, "opponents": "top",
-            "reference": None, "fitness": "bank",
-            "holdout_opponents": 0, "rng_seed": 0, "group": "cem-test",
-        }
-        # Config survives a JSON roundtrip inside the tarball
+        # The REAL composed experiment survives the JSON roundtrip inside the
+        # tarball -- transport fidelity of what actually ships, not of a stub.
+        config = self._apply_driver_transforms(
+            composed_cem_config("+experiment=smoke"))
         tb = _build_tarball_bytes(config)
         with tarfile.open(fileobj=io.BytesIO(tb), mode="r:gz") as tar:
             loaded = json.load(tar.extractfile("cem_config.json"))
         assert loaded == config
+
+    def test_kernel_rejects_unknown_config_keys(self):
+        config = self._apply_driver_transforms(composed_cem_config())
+        config["ramp_shape"] = 2
+        with pytest.raises(SystemExit, match="ramp_shape"):
+            resolve_cem_config(config)
+
+    def test_kernel_rejects_missing_config_keys(self):
+        config = self._apply_driver_transforms(composed_cem_config())
+        del config["ramp"]
+        with pytest.raises(SystemExit, match="ramp"):
+            resolve_cem_config(config)
+
+    def test_kernel_consumes_exactly_the_composed_keys(self):
+        # configs/cem.yaml -> driver transforms -> kernel validation, with no
+        # slack on either side: a new yaml key without a KNOWN_KEYS entry (and
+        # kernel support) fails here, as does a KNOWN_KEYS entry no yaml
+        # produces.
+        config = self._apply_driver_transforms(composed_cem_config())
+        resolved = resolve_cem_config(config)   # must not raise
+        assert set(resolved) == KNOWN_KEYS
 
     def test_init_params_data_embedded(self):
         from params import Params
@@ -183,10 +226,10 @@ class TestKernelScriptImports:
 
     def test_imported_helpers_exist(self):
         from search.cem import (  # noqa: F401
-            initial_distribution, sample, refit, score_local,
-            selection_score, HOLDOUT_OFFSET, CLEAN_OFFSET,
-            WORST_TOLERANCE, WORST_TOLERANCE_FLOOR,
+            initial_distribution, sample, refit, ramp_schedule, score_local,
+            selection_score, worst_tolerance, HOLDOUT_OFFSET, CLEAN_OFFSET,
         )
+        from search.kernel_config import resolve_cem_config  # noqa: F401
         from search.league import (  # noqa: F401
             build_cells, normalised_fitness, worst_opponent,
         )

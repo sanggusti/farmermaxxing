@@ -1,6 +1,9 @@
 """Evaluate a parameter set against frozen opponents. The promotion gate.
 
-    python -m sim.arena --seeds 12 --opponents starter,pass --wandb
+    python -m sim.arena seeds=12 'opponents="starter,pass"' wandb=true
+
+Configuration composes from configs/arena.yaml (issue #98); comma-separated
+pool specs need quoting because Hydra's override grammar reserves the comma.
 
 Every matchup is played from BOTH seats. The engine quotes both players against
 the same pre-commit market inventory, so seats are nearly symmetric -- but weed
@@ -15,7 +18,7 @@ Two metrics, used for different jobs:
                submission, never for tuning (too noisy at this sample size).
 """
 
-import argparse
+import os
 import statistics
 import sys
 
@@ -209,27 +212,21 @@ def summarise(rows):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--seeds", type=int, default=8)
-    ap.add_argument("--opponents", default="starter",
-                    help="built-ins, frozen snapshot names, or 'all'/'frozen'")
-    ap.add_argument("--steps", type=int, default=720)
-    ap.add_argument("--params", default=None)
-    ap.add_argument("--wandb", action="store_true", help="log this sweep to W&B")
-    ap.add_argument("--group", default=None)
-    args = ap.parse_args()
+def main(cfg):
+    """Run the sweep described by `cfg` (composed from configs/arena.yaml).
 
-    params = Params.from_json(args.params) if args.params else Params()
-    opponents, labels = resolve_pool(args.opponents)
-    seeds = list(range(args.seeds))
+    Exits via sys.exit rather than returning the code: hydra.main discards
+    return values, and errored episodes must fail the invocation.
+    """
+    params = Params.from_json(cfg.params) if cfg.params else Params()
+    opponents, labels = resolve_pool(cfg.opponents)
+    seeds = list(range(cfg.seeds))
 
-    if not args.wandb:
-        import os
+    if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
 
     from dataclasses import asdict
-    with wandb_setup.start("arena", config=asdict(params), group=args.group,
+    with wandb_setup.start("arena", config=asdict(params), group=cfg.group,
                            tags=["arena"]) as run:
         table = wandb_setup.table(
             ["opponent", "seed", "seat", "bank", "opp_bank", "win", "status"])
@@ -240,7 +237,7 @@ def main():
                                  ("opponent", "seed", "seat", "bank",
                                   "opp_bank", "win", "status")])
 
-        rows = evaluate(params, opponents, seeds, args.steps,
+        rows = evaluate(params, opponents, seeds, cfg.steps,
                         on_episode=record, labels=labels, metrics=True)
         stats = summarise(rows)
 
@@ -272,9 +269,13 @@ def main():
         print(f"  {name:<22} bank {b['mean_bank']:>11,.0f}   win {b['win_rate']:>6.1%}   n={b['n']}")
     if stats["errors"]:
         print(f"ERRORS      : {stats['errors']} episodes did not finish cleanly")
-        return 1
-    return 0
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Deferred decoration: importing this module (search.cem imports
+    # CENSUS_KEYS) must never require hydra -- only running it does.
+    import hydra
+    _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    hydra.main(config_path=os.path.join(_REPO, "configs"),
+               config_name="arena", version_base=None)(main)()
