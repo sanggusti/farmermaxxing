@@ -21,6 +21,7 @@ than a win/loss bit, which means many fewer episodes per candidate.
 
 import argparse
 import contextlib
+import json
 import os
 import random
 import statistics
@@ -105,6 +106,58 @@ def refit(elites, smoothing=0.3, floor=0.02, int_floor=0.4):
     return mean, std
 
 
+def ramp_schedule(generations, seeds, ramp=1.0):
+    """Per-generation train-seed counts, geometric in shape, exact in budget.
+
+    Retrospective Approximation (issue #72): a constant episode allocation
+    spends as much separating generation 1's wildly different candidates as
+    generation 40's near-identical ones. A geometric ramp with first->last
+    ratio `ramp` moves that budget to where selection actually decides --
+    ~3x the resolution in the closing generations -- while `sum(schedule) ==
+    generations * seeds` holds EXACTLY, so a ramped run costs the same
+    episodes as the constant run it is compared against. Budget-neutrality is
+    by construction, not by rounding luck: the raw geometric shape is scaled,
+    rounded, then repaired one seed at a time under the invariants
+    (non-decreasing, every generation >= 1 seed).
+
+    ramp=1.0 is the identity: every existing invocation is unchanged.
+    """
+    if generations < 1:
+        raise ValueError(f"generations must be >= 1, got {generations}")
+    if seeds < 1:
+        raise ValueError(f"seeds must be >= 1, got {seeds}")
+    if ramp <= 0:
+        raise ValueError(f"ramp must be > 0, got {ramp}")
+    if ramp == 1.0 or generations == 1:
+        return [seeds] * generations
+
+    budget = generations * seeds
+    shape = [ramp ** (g / (generations - 1)) for g in range(generations)]
+    scale = budget / sum(shape)
+    # round() of an increasing sequence is non-decreasing; max(1, .) keeps it so.
+    sched = [max(1, round(scale * f)) for f in shape]
+
+    # Repair the rounding residual to exactness. Increments go late-first
+    # (the last slot always accepts one); decrements go early-first, only
+    # where a generation stays >= 1 and the sequence stays non-decreasing.
+    residual = budget - sum(sched)
+    while residual > 0:
+        for g in range(generations - 1, -1, -1):
+            if g == generations - 1 or sched[g] + 1 <= sched[g + 1]:
+                sched[g] += 1
+                residual -= 1
+                if residual == 0:
+                    break
+    while residual < 0:
+        for g in range(generations):
+            if sched[g] > 1 and (g == 0 or sched[g] - 1 >= sched[g - 1]):
+                sched[g] -= 1
+                residual += 1
+                if residual == 0:
+                    break
+    return sched
+
+
 def score_local(vectors, cells, steps, metrics=False):
     """Same contract as score_modal: one summary per candidate, over `cells`."""
     from sim.fastplay import fast_play
@@ -179,6 +232,20 @@ WORST_TOLERANCE = 0.05
 # wobble through while still catching a genuine collapse.
 WORST_TOLERANCE_FLOOR = 4000.0
 
+def worst_tolerance(best_worst):
+    """How far below the incumbent's worst margin a challenger may sit.
+
+    Shared by every search driver (cem, cmaes, subspace) so the guard cannot
+    drift between them. Absolute, scaled by the incumbent's magnitude, with a
+    floor: a multiplicative `best * (1 - tol)` is wrong for a signed quantity
+    (at best_worst = -1,000 it sets the bar at -950, rejecting a genuine
+    improvement to -980), and with no floor a tie at exactly 0 -- the normal
+    warm-start-vs-itself case -- makes the guard infinitely strict (a v7 run
+    rejected 16 of its first 17 generations that way).
+    """
+    return max(WORST_TOLERANCE * abs(best_worst or 0.0), WORST_TOLERANCE_FLOOR)
+
+
 # Three sets, because two is not enough. Train fits the parameters. Holdout
 # picks the champion, once per generation, which makes it a selection set:
 # repeatedly taking the max over a noisy 16-episode measurement biases it
@@ -192,7 +259,16 @@ def main():
     ap.add_argument("--generations", type=int, default=8)
     ap.add_argument("--population", type=int, default=24)
     ap.add_argument("--elite-frac", type=float, default=0.25)
-    ap.add_argument("--seeds", type=int, default=4, help="train seeds per gen")
+    ap.add_argument("--seeds", type=int, default=4,
+                    help="train seeds per gen (the MEAN per gen when --ramp "
+                         "is not 1: the total budget is generations * seeds "
+                         "either way)")
+    ap.add_argument("--ramp", type=float, default=1.0,
+                    help="first->last ratio of a geometric train-seed ramp "
+                         "(Retrospective Approximation, issue #72). 1.0 keeps "
+                         "the constant allocation; 8.0 starts at ~a third of "
+                         "--seeds and finishes at ~2.5x it, same total budget "
+                         "to the episode")
     ap.add_argument("--train-pool", type=int, default=TRAIN_POOL,
                     help="training seeds rotate from [0, pool) each generation. "
                          "Must be < HOLDOUT_OFFSET (%(default)s)")
@@ -229,6 +305,8 @@ def main():
                          "every instrument reported it as the day's best "
                          "candidate.")
     ap.add_argument("--modal", action="store_true", help="fan out on Modal")
+    ap.add_argument("--kaggle", action="store_true",
+                    help="run on Kaggle notebook (free, ~40 min)")
     ap.add_argument("--rng-seed", type=int, default=0)
     ap.add_argument("--group", default=None)
     ap.add_argument("--no-wandb", action="store_true")
@@ -239,15 +317,41 @@ def main():
                          "(default 0.25 cold, 0.10 warm)")
     args = ap.parse_args()
 
+    if args.kaggle:
+        # kaggle_nb rebuilds its config dict from args explicitly, so a flag
+        # it does not know about would be dropped WITHOUT ERROR -- a run
+        # asking for a ramp would silently get the constant allocation, which
+        # is exactly the shape of bug rule 7 exists for. Refuse instead.
+        if args.ramp != 1.0:
+            ap.error("--ramp is not forwarded to the Kaggle backend yet; "
+                     "run with --modal or locally, or teach "
+                     "search/kaggle_nb.py to forward it first")
+        from search.kaggle_nb import run_cem_on_kaggle
+        run_cem_on_kaggle(args)
+        return
+
     if args.no_wandb:
         os.environ["WANDB_MODE"] = "disabled"
 
     if args.train_pool >= HOLDOUT_OFFSET:
         ap.error(f"--train-pool {args.train_pool} overlaps with holdout seeds "
                  f"(HOLDOUT_OFFSET={HOLDOUT_OFFSET})")
-    if args.train_pool < args.seeds:
-        ap.error(f"--train-pool {args.train_pool} < --seeds {args.seeds}: "
-                 f"every generation would reuse seeds")
+    # The ramp reshapes WHEN episodes are spent, never how many: the schedule
+    # sums to generations * seeds exactly. Only train cells ramp -- holdout
+    # and clean cells keep their fixed sizes, because selection precision is
+    # bought by the holdout set and the ramp's job is late-generation RANKING
+    # precision.
+    seeds_schedule = ramp_schedule(args.generations, args.seeds, args.ramp)
+    if args.train_pool < max(seeds_schedule):
+        ap.error(f"--train-pool {args.train_pool} < the largest generation's "
+                 f"seed count {max(seeds_schedule)}: that generation would "
+                 f"reuse seeds within itself")
+    # Cumulative offsets: consecutive generations take consecutive seed
+    # blocks, so at --ramp 1 this is bit-for-bit the legacy
+    # (gen * seeds + i) % pool rotation and old runs stay reproducible.
+    seed_starts = [0]
+    for n in seeds_schedule:
+        seed_starts.append(seed_starts[-1] + n)
 
     rng = random.Random(args.rng_seed)
     # Train seeds rotate per generation; built inside the loop.
@@ -316,6 +420,9 @@ def main():
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
         "train_cells_per_gen": len(train_opps) * args.seeds * 2,
+        "ramp": args.ramp, "seeds_schedule": seeds_schedule,
+        "train_episodes_total":
+            args.population * len(train_opps) * 2 * sum(seeds_schedule),
         "holdout_cells": len(holdout_cells),
         "backend": "modal" if args.modal else "local",
         "init_params": args.init_params or "defaults", "init_spread": spread,
@@ -330,9 +437,12 @@ def main():
 
             # Rotate training seeds each generation so the search cannot
             # overfit a fixed seed set (issue #68, Vermetten et al. 2022).
-            # Common random numbers still hold WITHIN a generation.
-            train_seeds = [(gen * args.seeds + i) % args.train_pool
-                           for i in range(args.seeds)]
+            # Common random numbers still hold WITHIN a generation. The count
+            # comes from the ramp schedule (issue #72); the cumulative start
+            # keeps blocks consecutive, so at --ramp 1 this is the legacy
+            # (gen * seeds + i) % pool.
+            train_seeds = [(seed_starts[gen] + i) % args.train_pool
+                           for i in range(seeds_schedule[gen])]
             train_cells = build_cells(train_opps, train_labels, train_seeds)
 
             stats = score(population, train_cells, args.steps)
@@ -374,14 +484,8 @@ def main():
             # loses matches even as the mean rises. This is the gate's
             # fourth check, moved into the loop where it can still steer.
             worst_label, worst_margin = worst_opponent(champion_stats)
-            # Tolerance is absolute, scaled by the incumbent's magnitude. A
-            # multiplicative `best * (1 - tol)` is wrong for a signed quantity:
-            # at best_worst = -1,000 it sets the bar at -950, so a genuine
-            # improvement to -980 would be rejected for being "below" it.
-            tolerance = max(WORST_TOLERANCE * abs(best_worst or 0.0),
-                            WORST_TOLERANCE_FLOOR)
             regressed = (best_worst is not None
-                         and worst_margin < best_worst - tolerance)
+                         and worst_margin < best_worst - worst_tolerance(best_worst))
             if selection_score(champion_stats, sel_key) > best_holdout and not regressed:
                 best_holdout = selection_score(champion_stats, sel_key)
                 best_worst = worst_margin if best_worst is None else max(best_worst, worst_margin)
@@ -409,6 +513,13 @@ def main():
                 # mean margin over the reference pool. Not interchangeable.
                 "best_holdout_overall": best_holdout,
                 "selection_metric": sel_key,
+                # The ramp's audit trail: cumulative episodes must land on
+                # exactly population * opps * 2 * generations * seeds at the
+                # end, or the "budget-neutral" claim is false.
+                "train_seeds_this_gen": seeds_schedule[gen],
+                "episodes_this_gen": args.population * len(train_cells),
+                "cum_train_episodes":
+                    args.population * len(train_opps) * 2 * seed_starts[gen + 1],
             }
             # Land and breadth census for the generation champion. Diagnostics,
             # never fitness -- optimising a proxy for "using the farm" instead
@@ -453,6 +564,25 @@ def main():
             for key in ARENA_CENSUS_KEYS:
                 if f"mean_{key}" in clean:
                     run.summary[f"clean_{key}"] = clean[f"mean_{key}"]
+            # Per-cell clean scores, for cross-restart comparison. Runs that
+            # share --reference and --clean-seeds produce aligned cell lists
+            # (build_cells order is deterministic and pinned by test_league),
+            # which is what `python -m search.restarts --cells a,b,...` needs
+            # to pair them: the T&T correction and the paired comparison both
+            # die without cell alignment. `banks`/`margins` are positional in
+            # clean_cells order, same contract as sim/gate.py's pairing.
+            clean_scores_path = os.path.join(run_dir, "clean_scores.json")
+            with open(clean_scores_path, "w") as f:
+                json.dump({
+                    "group": group,
+                    "selection_metric": sel_key,
+                    "selection_score": best_holdout,
+                    "clean_mean_bank": clean["mean_bank"],
+                    "cell_labels": [[label, seed, seat]
+                                    for _, label, seed, seat in clean_cells],
+                    "clean_banks": clean["banks"],
+                    "clean_margins": clean["margins"],
+                }, f, indent=1)
 
         run.summary["best_holdout_bank"] = best_holdout
         run.summary["best_train_bank"] = best_train
@@ -500,6 +630,9 @@ def main():
         print("optimised toward and is biased upward by construction.")
     print(f"\n{best_path}")
     print(f"promote with:  make promote FROM={best_path}")
+    if clean is not None:
+        print(f"compare restarts with:  python -m search.restarts "
+              f"--cells {os.path.join(run_dir, 'clean_scores.json')},<other runs>")
 
 
 if __name__ == "__main__":
