@@ -102,9 +102,10 @@ search:  ## CEM locally (small; for smoke-testing the loop)
 search-modal:  ## CEM fanned out on Modal (the real run)
 	$(PY) -m search.cem backend=modal generations=10 population=48 seeds=6
 
-search-kaggle:  ## CEM on Kaggle notebook (free). EXP=smoke picks an experiment file
+search-kaggle:  ## CEM on Kaggle notebook (free). EXP=smoke picks an experiment file; ARGS='machine=tpu ...' appends overrides
 	$(PY) -m search.cem backend=kaggle \
-	  $(if $(EXP),+experiment=$(EXP),generations=10 population=48 seeds=6)
+	  $(if $(EXP),+experiment=$(EXP),generations=10 population=48 seeds=6) \
+	  $(ARGS)
 
 search-cma:  ## CMA-ES locally (small; for smoke-testing the loop)
 	$(PY) -m search.cmaes generations=6 seeds=2 holdout_seeds=3 clean_seeds=3

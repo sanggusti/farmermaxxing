@@ -158,7 +158,10 @@ def main():
         from obs import wandb_setup
         with wandb_setup.start("tpu-probe", group="tpu-probe",
                                tags=["tpu-probe"], config=probe) as run:
-            run.summary.update(probe)
+            # Namespaced: probe.json's keys are whatever the probe measured
+            # that day, and dumping them bare mints a top-level panel per key
+            # (canonical key schema: obs/wandb_setup.py).
+            run.summary.update({f"probe/{k}": v for k, v in probe.items()})
         print("logged to W&B (job_type tpu-probe)")
 
 

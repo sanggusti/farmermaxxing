@@ -16,6 +16,27 @@ seeds: 4
 # ~a third of `seeds` and finishes at ~2.5x it, same total budget to the episode.
 ramp: 1.0
 rng_seed: 0
+# Per-block bimodality diagnostic over each generation's elite pool (issue
+# #70): k-means k=1 vs k=2 BIC + centroid-axis separation per semantic block
+# (search/blocks.py). Zero extra episodes, zero rng draws -- turning it on
+# cannot perturb the search. It is the evidence gate for crossover_frac. At
+# the default 6-elite pool the verdict is untrustworthy either way (0.8% of
+# unimodal pools fire spuriously at n=6, measured); size the pool via
+# configs/experiment/bimodal-tpu.yaml (48 elites/gen) and watch
+# diag/underpowered.
+diagnostics: false
+# Fraction of each generation's offspring built by whole-block crossover
+# between two elite parents instead of Gaussian sampling (issue #70). 0.0 is
+# byte-identical production CEM -- same rng draw sequence, pinned by
+# tests/test_blocks.py. NOT the coordinate-wise SBX/BLX refuted 2026-08-19
+# (DEVELOPMENTS.md): blocks, not coordinates; donation, never midpoints. Do
+# not raise without diag/*/bimodal evidence from a diagnostic run.
+crossover_frac: 0.0
+# Kaggle machine tier, backend=kaggle only: cpu (4 cores, unlimited quota) |
+# tpu (96 usable cores via sched_getaffinity, 67.5 eps/s = 98x single-process
+# = ~24x the cpu tier, ~20h/week quota; measured by make probe-tpu,
+# runs/tpu-probe/probe.json, DEVELOPMENTS.md 2026-08-19).
+machine: cpu
 
 # No chdir, no outputs/, no .hydra/, no logging reconfiguration: runs/<group>/
 # is the record and the drivers manage their own output.

@@ -856,3 +856,86 @@ of the TPU VM's ~20h/week quota; the observed cost is the queue (~9 minutes
 waiting for a TPU slot on this run, against 692s for the whole CPU-tier smoke).
 Migration is deliberately NOT part of #98 — it is its own change, and now its
 justification is a measurement instead of a spec sheet.
+
+### 2026-08-21, issue #70's actionables: the bimodality diagnostic, block crossover behind evidence, the TPU tier, one wandb schema
+
+Issue #70 recorded the optimiser literature review as negatives; most of its
+positives had already landed elsewhere (pycma via #72, the variance floor in
+`refit`, seed rotation via #68). Four things remained actionable, and they
+land together here.
+
+**Parameter blocks are data now** (`search/blocks.py:BLOCKS`). The ten
+comment/blank-line groups of `SEARCH_SPACE` — labour, land, targets, economy,
+season_mix, market, sell_floor, prio, fertilize, distance — promoted to
+tuples, with `tests/test_blocks.py` asserting they exactly partition the 60
+names. Before this, a new parameter without a "block" was merely uncommented;
+now it is a test failure, because two instruments depend on the partition.
+
+**The bimodality diagnostic** (`block_bimodality`, wired into both CEM
+drivers behind `diagnostics: false`). Per block, per generation: deterministic
+2-means against the 1-mean fit, scored by x-means BIC plus a centroid-axis
+separation, `bimodal = delta_bic > 10 and separation > 3.0 and both clusters
+>= 2 and n >= MIN_POOL`. The thresholds carry their measurements: k-means
+splits a UNIMODAL Gaussian at separation ~2.65 asymptotically (2·0.798/0.603),
+so 3.0 is the artefact ceiling plus margin; and on 400 synthetic unimodal
+pools per size, n=6 pools cleared both thresholds spuriously 0.8% of the time
+(max separation 21.5 — six points split 2+4 can look arbitrarily clean),
+n=12 still 0.2%, n>=16 never, while power on genuinely bimodal draws is 100%
+from n=16. Hence `MIN_POOL = 24` gates the verdict itself and
+`diag/underpowered` flags any run whose pool cannot testify — the production
+default pool is 6 (population 24 × elite_frac 0.25), which would otherwise
+average a phantom basin every ~12 generation-blocks with `diagnostics=true`.
+Elites are examined per-generation only, never pooled across generations:
+the 0.7/0.3 mean smoothing moves the fit every generation, and that drift is
+indistinguishable from the basin structure the test hunts. Zero extra
+episodes (it reads the elites the run already holdout-scored), zero rng
+draws (deterministic Lloyd seeded at the farthest pair), so turning it on
+cannot perturb the search it watches.
+
+**Block crossover, off by default** (`crossover_children`, `crossover_frac:
+0.0`). NOT a re-litigation of the 2026-08-19 refutation: that verdict was
+about coordinate-wise SBX/BLX, whose children interpolate — and the diagonal
+Gaussian's multi-basin failure IS the interpolant, the mean in the valley
+between basins. This operator donates whole blocks from one of two elite
+parents, never a midpoint, so it cannot produce a valley point. It stays off
+until a diagnostic run fires `diag/*/bimodal`; the control arm for that
+experiment is production CEM itself, whose `refit` already carries the
+variance floor #70 demands of the control. At `crossover_frac=0.0` the
+driver consumes the identical rng draw sequence as before the flag existed
+(Gaussian draws first, the operator returns before touching rng at zero
+children — pinned by test). `xover/elite_children` is the survival readout:
+zero across a run means the operator never beat the Gaussian's own offspring.
+
+**The TPU tier** (`machine: tpu`, the migration the 2026-08-19 probe
+deliberately deferred). The kernel now sizes its fork pool from
+`sched_getaffinity` — 4 on the CPU tier as before, 96 on the TPU VM (probe:
+67.5 eps/s, 98x single-process, ~24x the CPU kernel) — and requests the TPU
+via the `enable_tpu` kernel metadata the probe validated, under its own slug
+(`farmermaxxing-cem-search-tpu`) so a TPU experiment can never 409-clobber a
+running CPU search. Rule 7 guard in the kernel's first minute: `machine=tpu`
+with fewer than 16 granted cores is a SystemExit, because a silent landing
+on the CPU tier would complete ~24x slower with plausible numbers. The
+kernel also writes `clean_scores.json` in `finish_run`'s exact schema now,
+so two Kaggle runs pair through `python -m search.restarts --cells a,b` the
+same as local ones — which is what makes crossover-vs-control a paired
+measurement. Experiments: `configs/experiment/bimodal-tpu.yaml` (population
+192 → 48 elites/gen, the pool the statistic needs; ~170k episodes ≈ 42 min
+of TPU compute ≈ 3.5% of the weekly quota) and `crossover-tpu.yaml`
+(DO-NOT-RUN-without-diagnostic-evidence, says so in the header).
+
+**One wandb key schema** (`obs/wandb_setup.py` docstring is the registry).
+The drivers had drifted — subspace logged `iter`/`holdout_cand_bank` where
+the others logged `gen`/`holdout_best_bank`, arena minted `vs_{name}/` beside
+the drivers' `vs/{label}/`, `selection_metric` (a string) rode every step
+row, the tpu-probe dumped raw probe.json keys into the summary — so every
+experiment minted fresh panels in a workspace whose charts should have been
+shared. Renamed cleanly: `iter`→`gen`, `holdout_cand_bank`→
+`holdout_best_bank`, `best_holdout_overall`→`best_holdout_bank` (unifying
+the step key with the summary key finish_run already wrote), `vs_{name}/`→
+`vs/{name}/`, probe keys → `probe/*`, `selection_metric` → run config.
+`start()` grew `step_metric=` and every search driver passes `"gen"`, so
+runs whose loops log at different cadences line up on one x-axis. Old
+subspace/arena runs keep their old panels — the accepted cost of renaming
+over aliasing. The new `diag/*` and `xover/*` keys are stable by
+construction (block names are a fixed set), so every diagnostic run lands
+on the same charts.

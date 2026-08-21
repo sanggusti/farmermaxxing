@@ -41,6 +41,8 @@ from sim.arena import CENSUS_KEYS as ARENA_CENSUS_KEYS         # noqa: E402
 from sim.opponents import resolve_pool                         # noqa: E402
 from search.league import (build_cells, normalised_fitness,    # noqa: E402
                            worst_opponent)
+from search.blocks import (BLOCKS, MIN_POOL, bimodality_report,  # noqa: E402
+                           crossover_children)
 
 # Searches write to their own run directory, never straight to the tracked
 # agent/params.json. Writing into the working tree means a concurrent command
@@ -365,6 +367,20 @@ def main(cfg):
     """Run the search described by `cfg` (composed from configs/cem.yaml)."""
     from omegaconf import OmegaConf   # driver-side only, like hydra below
 
+    # Validate the issue-#70 knobs before any backend routing, so a bad value
+    # dies in the first second locally instead of after a Kaggle push.
+    if not 0.0 <= cfg.crossover_frac <= 0.9:
+        raise SystemExit(f"error: crossover_frac {cfg.crossover_frac} outside "
+                         f"[0, 0.9]: some Gaussian offspring must remain or "
+                         f"refit would fit recombinants of its own elites only")
+    if cfg.machine not in ("cpu", "tpu"):
+        raise SystemExit(f"error: machine must be cpu or tpu, got "
+                         f"{cfg.machine!r}")
+    if cfg.machine == "tpu" and cfg.backend != "kaggle":
+        raise SystemExit("error: machine=tpu selects a Kaggle kernel tier; "
+                         "it means nothing under backend="
+                         f"{cfg.backend} -- drop it or use backend=kaggle")
+
     if cfg.backend == "kaggle":
         # The COMPOSED config is handed over whole; search/kernel_config.py
         # makes the kernel refuse any key it does not know, which replaced
@@ -455,11 +471,16 @@ def main(cfg):
     # us on episodes we have never seen.
     best_holdout, best_vec, best_train = float("-inf"), None, None
     best_worst = None
+    sel_key = "mean_margin" if cfg.fitness == "margin" else "mean_bank"
 
     # The FULL composed config, so a new yaml key reaches wandb without anyone
     # remembering to forward it, plus the derived values worth charting.
-    with backend_session, wandb_setup.start("cem", group=group, tags=["cem"], config={
+    # selection_metric is a string, so it lives here and never in a row
+    # (see the canonical key schema in obs/wandb_setup.py).
+    with backend_session, wandb_setup.start("cem", group=group, tags=["cem"],
+                                            step_metric="gen", config={
         **OmegaConf.to_container(cfg, resolve=True),
+        "selection_metric": sel_key,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
         "train_cells_per_gen": len(train_opps) * cfg.seeds * 2,
@@ -470,10 +491,23 @@ def main(cfg):
         "init_params": cfg.init_params or "defaults", "init_spread": spread,
     }) as run:
 
+        prev_elites = None
         for gen in range(cfg.generations):
+            # Whole-block crossover children replace sampled offspring
+            # one-for-one (budget-neutral) and only from generation 1 --
+            # generation 0 has no elite pool. Gaussian draws come FIRST and
+            # crossover_children returns before touching rng at n_cross=0,
+            # so crossover_frac=0.0 consumes exactly the historical draw
+            # sequence (pinned by tests/test_blocks.py).
+            n_cross = 0
+            if cfg.crossover_frac > 0 and prev_elites:
+                n_cross = int(round(cfg.population * cfg.crossover_frac))
+            population = [sample(mean, std, rng)
+                          for _ in range(cfg.population - n_cross)]
+            population += crossover_children(prev_elites or [], n_cross, rng)
+            origins = ["g"] * (cfg.population - n_cross) + ["x"] * n_cross
             # Generation 0 always includes the current defaults, so a search can
             # never return something worse than what we started with.
-            population = [sample(mean, std, rng) for _ in range(cfg.population)]
             if gen == 0:
                 population[0] = flatten(base)
 
@@ -495,8 +529,9 @@ def main(cfg):
             # `starter` -- the exact bias this change exists to remove.
             key = "margins" if cfg.fitness == "margin" else "banks"
             fitness = normalised_fitness([s[key] for s in stats])
-            ranked = sorted(zip(fitness, stats, population), key=lambda t: -t[0])
-            elites = [vec for _, _, vec in ranked[:n_elite]]
+            ranked = sorted(zip(fitness, stats, population, origins),
+                            key=lambda t: -t[0])
+            elites = [vec for _, _, vec, _ in ranked[:n_elite]]
 
             # Re-score the elites on unseen seeds and pick the generation's
             # champion there. Only the elites, to keep the extra cost small.
@@ -515,7 +550,6 @@ def main(cfg):
             # was chosen, and the result won every matchup while its mean bank
             # stayed flat. Mean margin over a fixed pool is just as comparable
             # across generations as mean bank, so there is no reason to mix.
-            sel_key = "mean_margin" if cfg.fitness == "margin" else "mean_bank"
             hold_ranked = sorted(zip(hold_stats, elites),
                                  key=lambda sp: -selection_score(sp[0], sel_key))
             champion_stats, champion_vec = hold_ranked[0]
@@ -538,6 +572,7 @@ def main(cfg):
             new_mean, new_std = refit(elites)
             mean = {k: (1 - 0.3) * new_mean[k] + 0.3 * mean[k] for k in mean}
             std = new_std
+            prev_elites = elites
 
             train_best = ranked[0][1]["mean_bank"]
             row = {
@@ -545,16 +580,16 @@ def main(cfg):
                 "train_best_bank": train_best,
                 "train_pop_mean_bank": statistics.mean([s["mean_bank"] for s in stats]),
                 "train_elite_mean_bank": statistics.mean(
-                    [s["mean_bank"] for _, s, _ in ranked[:n_elite]]),
+                    [s["mean_bank"] for _, s, _, _ in ranked[:n_elite]]),
                 "holdout_best_bank": champion_stats["mean_bank"],
                 "holdout_win_rate": champion_stats["win_rate"],
                 "holdout_min_bank": champion_stats["min_bank"],
                 # A widening gap is the overfitting signal to watch.
                 "generalisation_gap": train_best - champion_stats["mean_bank"],
-                # In the units the champion was SELECTED on: mean bank, or
-                # mean margin over the reference pool. Not interchangeable.
-                "best_holdout_overall": best_holdout,
-                "selection_metric": sel_key,
+                # In the units the champion was SELECTED on (the config's
+                # selection_metric): mean bank, or mean margin over the
+                # reference pool. Not interchangeable.
+                "best_holdout_bank": best_holdout,
                 # The ramp's audit trail: cumulative episodes must land on
                 # exactly population * opps * 2 * generations * seeds at the
                 # end, or the "budget-neutral" claim is false.
@@ -576,6 +611,33 @@ def main(cfg):
                 row[f"vs/{label}/mean_bank"] = b["mean_bank"]
                 row[f"vs/{label}/win_rate"] = b["win_rate"]
             row["worst_opponent_margin"] = worst_margin
+            # diag/* and xover/* keys appear ONLY when their feature is on,
+            # so a default run's generations.jsonl rows stay exactly the
+            # historical rows. Block names are a fixed set, so the panels
+            # these keys mint are reused by every diagnostic run forever.
+            if cfg.crossover_frac > 0:
+                row["xover/children"] = n_cross
+                # The survival readout: are crossover children being SELECTED,
+                # or merely sampled? Zero here across a run means the operator
+                # never beat the Gaussian's own offspring.
+                row["xover/elite_children"] = sum(
+                    1 for _, _, _, o in ranked[:n_elite] if o == "x")
+            if cfg.diagnostics:
+                report = bimodality_report(elites)
+                fired = [b for b, r in report.items() if r["bimodal"]]
+                for bname, r in report.items():
+                    row[f"diag/{bname}/delta_bic"] = r["delta_bic"]
+                    row[f"diag/{bname}/separation"] = r["separation"]
+                    row[f"diag/{bname}/bimodal"] = int(r["bimodal"])
+                row["diag/bimodal_frac"] = len(fired) / len(report)
+                row["diag/n_elites"] = n_elite
+                row["diag/underpowered"] = int(n_elite < MIN_POOL)
+                if n_elite < MIN_POOL:
+                    print(f"  diag: UNDERPOWERED ({n_elite} elites < "
+                          f"{MIN_POOL}) -- 'unimodal' here is not evidence")
+                if fired:
+                    print(f"  diag: BIMODAL blocks {fired} -- "
+                          f"crossover_frac has its evidence gate")
             run.log(row)
             print(f"gen {gen:>2}  train {train_best:>11,.0f}  "
                   f"holdout {champion_stats['mean_bank']:>11,.0f}  "

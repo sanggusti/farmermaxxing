@@ -30,6 +30,10 @@ RUNS_DIR = os.path.join(REPO, "runs")
 STAGING_DIR = os.path.join(REPO, ".kaggle-staging")
 
 KERNEL_SLUG_SUFFIX = "farmermaxxing-cem-search"
+# TPU runs get their own kernel slot: a push to an ACTIVE slug 409s and then
+# overwrites it on retry, so sharing one slug would let a TPU experiment
+# clobber a running CPU-tier search (and vice versa).
+KERNEL_SLUG_SUFFIX_TPU = "farmermaxxing-cem-search-tpu"
 
 
 def _kaggle_username():
@@ -89,7 +93,7 @@ def _build_tarball_bytes(config_dict):
             tar.add(src, arcname=dirname, filter=_pycache_filter)
         # Selected search files — only the ones the kernel imports
         for fname in ("cem.py", "league.py", "modal_app.py",
-                      "kernel_config.py"):
+                      "kernel_config.py", "blocks.py"):
             src = os.path.join(REPO, "search", fname)
             if os.path.exists(src):
                 tar.add(src, arcname=f"search/{fname}",
@@ -366,6 +370,7 @@ def log_results_to_wandb(run_dir, group, config):
         results = json.load(f)
 
     with wandb_setup.start("cem", group=group, tags=["cem", "kaggle"],
+                           step_metric="gen",
                            config={**config, "backend": "kaggle"}) as run:
         # Replay per-generation metrics
         if os.path.exists(gen_path):
@@ -425,11 +430,23 @@ def run_cem_on_kaggle(cfg):
     group = config["group"]
     run_dir = os.path.join(RUNS_DIR, group)
 
+    # `machine` stays IN the shipped config: the kernel re-checks the tier it
+    # actually landed on (sched_getaffinity) and refuses a silent downgrade.
+    # enable_tpu as kernel metadata is the mechanism the TPU probe validated
+    # (search/kaggle_tpu_probe.py; measured 96 cores, 67.5 eps/s, ~9 min
+    # queue for a slot, ~20h/week quota).
+    on_tpu = config["machine"] == "tpu"
+    slug_suffix = KERNEL_SLUG_SUFFIX_TPU if on_tpu else KERNEL_SLUG_SUFFIX
+    slug = f"{username}/{slug_suffix}"
+    extra_meta = {"enable_tpu": "true"} if on_tpu else None
+
     print(f"=== Kaggle CEM: {group} ===")
     print(f"  generations: {config['generations']}")
     print(f"  population:  {config['population']}")
     print(f"  seeds:       {config['seeds']}")
     print(f"  opponents:   {config['opponents']}")
+    print(f"  machine:     {config['machine']}"
+          + ("  (expect ~9 min queueing for a TPU slot)" if on_tpu else ""))
     print()
 
     # Step 1: Build the self-extracting kernel script
@@ -448,20 +465,22 @@ def run_cem_on_kaggle(cfg):
     # Step 2: Push
     os.makedirs(STAGING_DIR, exist_ok=True)
     print("pushing kernel...")
-    push_kernel(username, script)
+    push_kernel(username, script, slug=slug, extra_meta=extra_meta)
 
-    # Step 3: Poll until done
+    # Step 3: Poll until done. The same slug threads through poll and
+    # download, or a TPU run would poll the CPU kernel's (possibly running)
+    # slot and fetch someone else's output.
     print(f"polling (timeout 2h, interval 30s)...")
-    status = poll(username, interval=30, timeout=7200)
+    status = poll(username, interval=30, timeout=7200, slug=slug)
 
     if status != "complete":
         print(f"kernel did not complete: {status}")
-        print(f"  check logs: kaggle kernels output {_kernel_slug(username)}")
+        print(f"  check logs: kaggle kernels output {slug}")
         sys.exit(1)
 
     # Step 4: Download results
     print("downloading results...")
-    best_path = download(username, run_dir)
+    best_path = download(username, run_dir, slug=slug)
 
     if best_path:
         print(f"\nbest_params.json: {best_path}")
