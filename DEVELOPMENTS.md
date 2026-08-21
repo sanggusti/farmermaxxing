@@ -768,3 +768,32 @@ tolerance + floor). All drivers keep the invariants: common random numbers
 within a generation, rotating train seeds, holdout selection, clean touched
 once, incumbent guarantee (cmaes and subspace holdout-score the warm start
 up front, so neither can report worse than it started).
+
+**Outcome of the first CMA-ES run** (`cmaes-g600-p16-topband`, 600 generations
+x lambda 16, ~238k episodes, warm-started from v12, top pool with `meta-c` and
+`top-dmitrylarko` held out, margin fitness, ~1h wall clock on Modal):
+
+- **The covariance adapted.** Axis ratio climbed monotonically 1.00 -> 2.85
+  over 600 generations, sigma settled at ~0.09. The machinery works; the
+  hypothesis "we were generation-starved" got its test.
+- **Holdout margin improved +7,754 over the warm start** (-50,236 -> -42,482),
+  and the gate's per-opponent view shows a margin gain against ALL EIGHT
+  opponents (+4,788 to +22,583, held-out dmitrylarko +14,610) — the candidate
+  suppresses opponent banks (rival-aware selling) rather than raising its own.
+- **The gate failed anyway, and rightly.** Clean bank delta vs v12: -137 at
+  1 sigma = 2,632 — a wash. Win rate 0% against every opponent, unchanged.
+  Rule 5 is the whole story: a +12k mean margin improvement flips nothing when
+  the matches are being lost by 34k-62k. Memorisation gap +9,427 (the warning
+  fired), selection bias +6,438 (+13.2%), and the shop-unlock confound is
+  LARGE (omega^2 0.56, 7 distinct first-shops) because the candidate moved the
+  land-fill profile (wheat 128 -> 0, carrot 0 -> 36, strawberry 107 -> 247).
+- **No submission.** The slot decision belongs to a human with the full
+  ledger; on this evidence the candidate is a margin-better, bank-equal,
+  win-equal sibling of v12 whose gains are part memorised.
+
+Verdict for the backlog: covariance adaptation is real but parameter search
+in this box keeps hitting the same wall the production gap predicts — the
+-50k margins are not a tuning artefact. The instruments (worst-opponent
+guard, memorisation gap, selection bias, confound omega^2) all fired
+correctly on the first run that stressed them, which was half the point of
+building them.
