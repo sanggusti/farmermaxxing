@@ -797,3 +797,50 @@ in this box keeps hitting the same wall the production gap predicts — the
 guard, memorisation gap, selection bias, confound omega^2) all fired
 correctly on the first run that stressed them, which was half the point of
 building them.
+
+### 2026-08-21, Hydra configuration: one home for experiment knobs (issue #98, PR #99)
+
+Every experiment knob lived in three places that could drift — argparse
+defaults in five entrypoints, hardcoded Makefile recipe flags, and the Kaggle
+backend's hand-copied 14-key config dict, where a flag it had not been taught
+was dropped WITHOUT ERROR. That last one was measured, not hypothetical: the
+`--ramp` refusal under `--kaggle` (above) existed only to paper over it.
+
+Now `configs/` is the single home: per-entrypoint primaries (`cem`, `cmaes`,
+`subspace`, `gate`, `arena`) over a shared `search_common.yaml`, experiment
+files under `configs/experiment/` composing via `+experiment=<name>`. Plain
+yaml, no dataclass schemas — struct mode already rejects a typo'd override
+(`generatoins=2` errors loudly), which is the failure mode that matters; the
+semantic validations (`train_pool < HOLDOUT_OFFSET`, cma's `rng_seed != 0`)
+stay as raises in the drivers with their measurements. The seed-range offsets
+themselves stay module constants on purpose: two runs with different offsets
+stop being comparable, and `sim/gate.py` pins the same numbers.
+
+The composed config now flows into the Kaggle kernel WHOLE
+(`OmegaConf.to_container` -> `cem_config.json`), and `search/kernel_config.py`
+makes the kernel refuse any unknown or missing key in its first minute — the
+`--ramp` guard generalised to every future key at once. The kernel gained the
+ramp (bit-for-bit the legacy rotation at `ramp=1.0`), lost its shadow
+`cfg.get(..., default)`s (a missing key is now a loud KeyError, never a
+default drifting from the yaml), and imports `worst_tolerance()` instead of
+inlining the arithmetic. Hydra is imported only under `__main__`, so the
+kernel and the Modal image never install it; no chdir, no `outputs/`, no
+`.hydra/` — `runs/<group>/` stays the record. Makefile var interfaces
+(`POOL=`, `SEEDS=`, `TRAINED_ON=`, `WANDB=1`) are unchanged; gate's
+POOL->top / SEEDS->8 fallbacks moved into `gate.yaml`.
+
+**Smoke run, end to end** (`make search-kaggle EXP=smoke`,
+`configs/experiment/smoke.yaml`: 2 gens x pop 8 x 2 seeds vs the top band):
+compose -> package -> push -> 4-core CPU kernel (692s wall) -> download ->
+`wandb sync`. The synced run
+(https://wandb.ai/gustiwinata/farmermaxxing/runs/a4el015p) carries the entire
+composed config including the keys the old dict never forwarded — `backend:
+kaggle`, `ramp: 1`, `seeds_schedule: [2, 2]`, `train_episodes_total: 512`
+(pop 8 x 8 tapes x 2 seats x 4 seeds, exact). Holdout 29,035 / clean 27,747:
+plumbing numbers from a 2-generation run, not a candidate.
+
+Issue hygiene done alongside, each closed with its evidence: #69 (CMA-ES
+shape — implemented and tested above), #46 (multi-restart — shipped, v4
+promoted from it), #45 (slot hedge — v11 was the hedge), #30 (travel waste —
+refuted in docs/3), #9 (sell-next-day — premise wrong, and immaterial at ~9
+unsold units a season).
