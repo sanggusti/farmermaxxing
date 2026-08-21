@@ -111,8 +111,13 @@ def _generate_kernel_script(tarball_b64, wandb_api_key=None):
     """Generate a self-extracting kernel script.
 
     The script embeds the tarball as base64, extracts it to /tmp/fm,
-    then runs the CEM loop. If wandb_api_key is provided, W&B tracking
-    is enabled for live monitoring.
+    then runs the CEM loop.
+
+    W&B runs in OFFLINE mode on Kaggle because: (1) wandb's _has_internet()
+    was removed causing AttributeError on Kaggle (wandb/wandb#10967), and
+    (2) Kaggle may disable internet for batch kernels. The offline run
+    files are saved to /kaggle/working/wandb/ and synced locally after
+    download by the orchestrator.
     """
     # Read the CEM kernel template
     template_path = os.path.join(
@@ -120,17 +125,21 @@ def _generate_kernel_script(tarball_b64, wandb_api_key=None):
     with open(template_path) as f:
         template = f.read()
 
-    # W&B setup: install wandb and set the key, or disable entirely
+    # W&B runs offline on Kaggle — synced after download by the orchestrator.
+    # Install wandb for offline logging; set key for later sync.
     if wandb_api_key:
         wandb_block = f'''
-# Install wandb for live tracking
+# Install wandb for offline tracking (live tracking broken on Kaggle:
+# wandb/wandb#10967 _has_internet removed; Kaggle may block internet).
 subprocess.check_call([
     sys.executable, "-m", "pip", "install",
     "wandb", "-q", "--disable-pip-version-check",
 ])
+os.environ["WANDB_MODE"] = "offline"
 os.environ["WANDB_API_KEY"] = "{wandb_api_key}"
 os.environ["WANDB_DISABLE_GIT"] = "true"
 os.environ["WANDB_SILENT"] = "true"
+os.environ["WANDB_DIR"] = "/kaggle/working"
 '''
     else:
         wandb_block = '''
@@ -292,6 +301,50 @@ def download(username, run_dir):
     return None
 
 
+def _sync_wandb_offline(run_dir, wandb_key):
+    """Sync the offline W&B run created by the Kaggle kernel.
+
+    The kernel logs to WANDB_MODE=offline with WANDB_DIR=/kaggle/working,
+    producing a wandb/offline-run-*/ directory. After download, `wandb sync`
+    pushes it to the server using the local API key.
+    """
+    import glob
+
+    wandb_dir = os.path.join(run_dir, "wandb")
+    if not os.path.isdir(wandb_dir):
+        print(f"\nW&B: no wandb/ directory found in {run_dir}")
+        print("  (kernel may not have reached wandb.init — check logs)")
+        return
+
+    # Find the offline run directory
+    offline_runs = glob.glob(os.path.join(wandb_dir, "offline-run-*"))
+    if not offline_runs:
+        # Also check for run- directories (wandb sometimes uses this format)
+        offline_runs = glob.glob(os.path.join(wandb_dir, "run-*"))
+    if not offline_runs:
+        print(f"\nW&B: no offline-run-* found in {wandb_dir}")
+        print(f"  contents: {os.listdir(wandb_dir)}")
+        return
+
+    os.environ["WANDB_API_KEY"] = wandb_key
+    for run_path in offline_runs:
+        print(f"\nsyncing W&B offline run: {os.path.basename(run_path)}")
+        result = subprocess.run(
+            ["wandb", "sync", run_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"  synced successfully")
+            # Extract the run URL from output
+            for line in result.stdout.splitlines():
+                if "wandb.ai" in line or "https://" in line:
+                    print(f"  {line.strip()}")
+        else:
+            print(f"  sync failed: {result.stderr.strip()}")
+            # Fall back to replay
+            print("  falling back to replay from generations.jsonl")
+
+
 def log_results_to_wandb(run_dir, group, config):
     """Replay the Kaggle CEM results into W&B, after the fact."""
     sys.path[:0] = [REPO, os.path.join(REPO, "agent")]
@@ -377,7 +430,7 @@ def run_cem_on_kaggle(args):
     wandb_key = None if args.no_wandb else _wandb_api_key()
     print("building kernel script with embedded code...")
     if wandb_key:
-        print("  W&B: live tracking enabled (key from .env)")
+        print("  W&B: offline logging on Kaggle, sync after download")
     else:
         print("  W&B: disabled" + (" (--no-wandb)" if args.no_wandb else " (no key found)"))
     tarball_bytes = _build_tarball_bytes(config)
@@ -417,16 +470,16 @@ def run_cem_on_kaggle(args):
                 print(f"clean:   {results['clean_bank']:,.0f}")
             print(f"wall:    {results.get('wall_seconds', 0):.0f}s")
 
-    # Step 5: Log to W&B (unless live tracking was already enabled)
-    if not args.no_wandb and not wandb_key:
-        # No API key was embedded, so the kernel ran with WANDB_MODE=disabled.
-        # Replay the results into W&B from the local machine.
+    # Step 5: Sync W&B
+    if not args.no_wandb and wandb_key:
+        # The kernel logged offline to wandb/ dir. Sync it now.
+        _sync_wandb_offline(run_dir, wandb_key)
+    elif not args.no_wandb:
+        # No API key — replay from generations.jsonl
         results_path = os.path.join(run_dir, "results.json")
         if os.path.exists(results_path):
-            print("\nreplaying results to W&B (kernel had no API key)...")
+            print("\nreplaying results to W&B...")
             log_results_to_wandb(run_dir, group, config)
-    elif wandb_key:
-        print("\nW&B: results already streamed live from Kaggle")
 
 
 # ---------------------------------------------------------------------------
