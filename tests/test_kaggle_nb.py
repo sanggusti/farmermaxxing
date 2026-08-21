@@ -73,6 +73,7 @@ class TestPackaging:
         assert "search/cem.py" in names
         assert "search/league.py" in names
         assert "search/kernel_config.py" in names
+        assert "search/blocks.py" in names
         assert "search/__init__.py" in names
 
         # Config

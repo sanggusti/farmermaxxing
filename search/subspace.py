@@ -204,9 +204,13 @@ def main(cfg):
     n_design = (cfg.dim + 1) * (cfg.dim + 2) // 2 + cfg.extra_points
 
     # The FULL composed config plus the derived values (same shape as cem).
+    # selection_metric is a string, so it lives here and never in a row
+    # (see the canonical key schema in obs/wandb_setup.py).
     with backend_session, wandb_setup.start("subspace", group=group,
-                                            tags=["subspace"], config={
+                                            tags=["subspace"],
+                                            step_metric="gen", config={
         **OmegaConf.to_container(cfg, resolve=True),
+        "selection_metric": sel_key,
         "design_points": n_design,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
@@ -267,18 +271,21 @@ def main(cfg):
                 radius = max(radius * 0.5, 0.02)
 
             row = {
-                "iter": it,
+                # `gen` and `holdout_best_bank`, not the historical `iter` /
+                # `holdout_cand_bank`: an iteration's single candidate IS this
+                # driver's generation-best, and the shared names are what let
+                # one wandb panel chart every driver (obs/wandb_setup.py).
+                "gen": it,
                 "train_best_bank": max(s["mean_bank"] for s in stats),
                 "train_pop_mean_bank":
                     statistics.mean([s["mean_bank"] for s in stats]),
-                "holdout_cand_bank": cand_stats["mean_bank"],
+                "holdout_best_bank": cand_stats["mean_bank"],
                 "holdout_win_rate": cand_stats["win_rate"],
                 "worst_opponent_margin": worst_margin,
                 "accepted": int(accepted),
                 "radius": radius,
                 "step_norm": float(np.linalg.norm(z_star)),
-                "best_holdout_overall": best_holdout,
-                "selection_metric": sel_key,
+                "best_holdout_bank": best_holdout,
             }
             for label, b in (cand_stats.get("by_opponent") or {}).items():
                 row[f"vs/{label}/mean_bank"] = b["mean_bank"]

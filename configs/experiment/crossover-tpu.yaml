@@ -1,0 +1,35 @@
+# @package _global_
+# Treatment arm of the block-crossover experiment (issue #70). DO NOT run
+# until a bimodal-tpu run shows diag/{block}/bimodal firing -- without that
+# evidence this re-litigates the 2026-08-19 crossover refutation
+# (DEVELOPMENTS.md; block crossover is a different operator from the refuted
+# coordinate-wise SBX/BLX, but "different operator" is not evidence).
+#
+# The control arm is production CEM -- refit already carries the variance
+# floor #70 demands of the control (floor=0.02, int_floor=0.4), so "CEM with
+# a variance floor" needs no new arm. Launch it as this same config with the
+# operator off, same rng_seed so seed rotation matches:
+#   make search-kaggle EXP=crossover-tpu ARGS='crossover_frac=0.0 group=cem-xover-ctrl'
+# then pair the clean evaluations (aligned cells, T&T correction):
+#   python -m search.restarts --cells runs/cem-xover-a/clean_scores.json,runs/cem-xover-ctrl/clean_scores.json
+#
+# crossover_frac 0.25: enough children (48/gen at population 192) that
+# xover/elite_children is a readable survival signal, few enough that refit
+# still fits a mostly-Gaussian population. diagnostics stay on: the readout
+# of interest is whether crossover REDUCES per-block bimodality while the
+# clean score holds or rises.
+# Run with:  make search-kaggle EXP=crossover-tpu
+backend: kaggle
+machine: tpu
+diagnostics: true
+crossover_frac: 0.25
+generations: 10
+population: 192
+elite_frac: 0.25
+seeds: 4
+holdout_seeds: 6
+clean_seeds: 8
+opponents: top
+init_params: agent/params.json
+rng_seed: 0
+group: cem-xover-a

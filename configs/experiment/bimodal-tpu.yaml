@@ -1,0 +1,31 @@
+# @package _global_
+# The bimodality diagnostic (issue #70): is the diagonal Gaussian's known
+# multi-basin failure -- a unimodal fit to elites straddling two basins puts
+# the mean IN THE VALLEY between them -- actually happening, per semantic
+# block? Sized for the STATISTIC, not the agent: population 192 x elite_frac
+# 0.25 = 48 elites/generation, because below 24 the k=1 vs k=2 test is
+# untrustworthy in both directions (0.8% of unimodal 6-elite pools fire
+# spuriously; 0/400 from n=16 -- measured, tests/test_blocks.py). The
+# diagnostic itself costs zero extra episodes (it reads the elites the run
+# already scored; #70 budgeted ~500 for a standalone probe).
+#
+# Budget: train 192 x 8 opps x 2 seats x 4 seeds = 12,288 eps/gen, holdout
+# 48 x 8 x 2 x 6 = 4,608/gen, x10 gens + clean ~ 170k episodes ~ 42 min at
+# the TPU VM's measured 67.5 eps/s -- ~3.5% of the ~20h/week TPU quota.
+#
+# Warm start from the champion because the question is about the elite pools
+# PRODUCTION searches produce; override init_params=null init_spread=0.25
+# for a cold-start variant (wider spread, more likely to straddle basins).
+# Run with:  make search-kaggle EXP=bimodal-tpu
+backend: kaggle
+machine: tpu
+diagnostics: true
+generations: 10
+population: 192
+elite_frac: 0.25
+seeds: 4
+holdout_seeds: 6
+clean_seeds: 8
+opponents: top
+init_params: agent/params.json
+group: cem-bimodal-diag

@@ -91,6 +91,8 @@ from search.cem import (                                      # noqa: E402
     initial_distribution, sample, refit, ramp_schedule,
     selection_score, worst_tolerance, HOLDOUT_OFFSET, CLEAN_OFFSET,
 )
+from search.blocks import (BLOCKS, MIN_POOL, bimodality_report,  # noqa: E402
+                           crossover_children)
 from search.kernel_config import resolve_cem_config            # noqa: E402
 from search.modal_app import summarise_cells                   # noqa: E402
 
@@ -115,14 +117,18 @@ def _run_one(args):
         row.update(r["metrics"][seat])
     return row
 
-# Kaggle provides 4 cores; use them all.
-_WORKERS = int(os.environ.get("FM_WORKERS", "4"))
+# Every core the sandbox actually grants: 4 on the CPU tier, 96 on the TPU
+# VM (the host advertises 224 but sched_getaffinity says 96 -- measured by
+# make probe-tpu: 67.5 eps/s at full width, 98x single-process).
+_WORKERS = (int(os.environ.get("FM_WORKERS", "0"))
+            or len(os.sched_getaffinity(0)))
 
 def score_local(vectors, cells, steps, metrics=False):
-    """Parallel version of search.cem.score_local for Kaggle's 4-core CPUs.
+    """Parallel version of search.cem.score_local, fanned across _WORKERS.
 
     ~51k episodes at 1.3s each would take ~18h single-threaded, exceeding
-    Kaggle's 12h limit. With 4 workers: ~4.7h, safely within budget.
+    Kaggle's 12h limit. With the CPU tier's 4 workers: ~4.7h; on the TPU
+    VM's 96: ~13 minutes (measured 67.5 eps/s, make probe-tpu).
     """
     work = []
     owner = []
@@ -165,6 +171,18 @@ fitness_key = cfg["fitness"]
 holdout_opponents_n = cfg["holdout_opponents"]
 rng_seed = cfg["rng_seed"]
 group = cfg["group"]
+diagnostics = cfg["diagnostics"]
+crossover_frac = cfg["crossover_frac"]
+
+# The tier guard, in the kernel's first minute (rule 7): a machine=tpu run
+# that Kaggle silently lands on the 4-core CPU tier would finish 24x slower
+# with plausible numbers and burn half a day where 13 minutes were budgeted.
+if cfg["machine"] == "tpu" and _WORKERS < 16:
+    raise SystemExit(
+        f"error: machine=tpu but the sandbox granted only {_WORKERS} cores "
+        f"-- the enable_tpu kernel metadata did not take; refusing to run "
+        f"the experiment ~24x slower on the wrong tier")
+print(f"machine tier {cfg['machine']}: {_WORKERS} workers")
 
 # Same ramp semantics as search.cem.main: the schedule sums to
 # generations * seeds exactly, and at ramp=1.0 the cumulative starts make
@@ -227,8 +245,10 @@ t0 = time.time()
 # whose .log() is a no-op, so the code below never branches.
 # The FULL shipped config plus the derived values, matching the local driver;
 # init_params_data is a whole parameter set, summarised as a flag instead.
-wandb_run = wandb_setup.start("cem", group=group, tags=["cem", "kaggle"], config={
+wandb_run = wandb_setup.start("cem", group=group, tags=["cem", "kaggle"],
+                              step_metric="gen", config={
     **{k: v for k, v in cfg.items() if k != "init_params_data"},
+    "selection_metric": sel_key,
     "init_params": "inline" if init_params_data else "defaults",
     "init_spread": spread,
     "train_opponents": train_labels, "reference_opponents": ref_labels,
@@ -240,9 +260,20 @@ wandb_run = wandb_setup.start("cem", group=group, tags=["cem", "kaggle"], config
     "backend": "kaggle",
 })
 
+prev_elites = None
 for gen in range(generations):
     gt = time.time()
-    population_vecs = [sample(mean, std, rng) for _ in range(population)]
+    # Whole-block crossover children replace sampled offspring one-for-one,
+    # only from generation 1; Gaussian draws FIRST so crossover_frac=0.0
+    # consumes exactly the historical rng sequence (same as search.cem.main,
+    # pinned by tests/test_blocks.py).
+    n_cross = 0
+    if crossover_frac > 0 and prev_elites:
+        n_cross = int(round(population * crossover_frac))
+    population_vecs = [sample(mean, std, rng)
+                       for _ in range(population - n_cross)]
+    population_vecs += crossover_children(prev_elites or [], n_cross, rng)
+    origins = ["g"] * (population - n_cross) + ["x"] * n_cross
     if gen == 0:
         population_vecs[0] = flatten(base)
 
@@ -255,8 +286,9 @@ for gen in range(generations):
     stats = score_local(population_vecs, train_cells, steps)
     key = "margins" if fitness_key == "margin" else "banks"
     fitness = normalised_fitness([s[key] for s in stats])
-    ranked = sorted(zip(fitness, stats, population_vecs), key=lambda t: -t[0])
-    elites = [vec for _, _, vec in ranked[:n_elite]]
+    ranked = sorted(zip(fitness, stats, population_vecs, origins),
+                    key=lambda t: -t[0])
+    elites = [vec for _, _, vec, _ in ranked[:n_elite]]
 
     # Re-score elites on holdout with census metrics
     hold_stats = score_local(elites, holdout_cells, steps, metrics=True)
@@ -280,6 +312,7 @@ for gen in range(generations):
     new_mean, new_std = refit(elites)
     mean = {k: (1 - 0.3) * new_mean[k] + 0.3 * mean[k] for k in mean}
     std = new_std
+    prev_elites = elites
 
     train_best = ranked[0][1]["mean_bank"]
     row = {
@@ -288,13 +321,13 @@ for gen in range(generations):
         "train_pop_mean_bank": statistics.mean(
             [s["mean_bank"] for s in stats]),
         "train_elite_mean_bank": statistics.mean(
-            [s["mean_bank"] for _, s, _ in ranked[:n_elite]]),
+            [s["mean_bank"] for _, s, _, _ in ranked[:n_elite]]),
         "holdout_best_bank": champion_stats["mean_bank"],
         "holdout_win_rate": champion_stats["win_rate"],
         "holdout_min_bank": champion_stats["min_bank"],
         "generalisation_gap": train_best - champion_stats["mean_bank"],
-        "best_holdout_overall": best_holdout,
-        "selection_metric": sel_key,
+        # In the units of the config's selection_metric (bank or margin).
+        "best_holdout_bank": best_holdout,
     }
     for ckey in ARENA_CENSUS_KEYS:
         if f"mean_{ckey}" in champion_stats:
@@ -310,6 +343,29 @@ for gen in range(generations):
     row["cum_train_episodes"] = (
         population * len(train_opps) * 2 * seed_starts[gen + 1])
     row["wall_seconds"] = time.time() - gt
+    # diag/* and xover/* only when their feature is on, so a default run's
+    # generations.jsonl rows stay exactly the historical rows (same block as
+    # search.cem.main; the statistics come from search/blocks.py either way).
+    if crossover_frac > 0:
+        row["xover/children"] = n_cross
+        row["xover/elite_children"] = sum(
+            1 for _, _, _, o in ranked[:n_elite] if o == "x")
+    if diagnostics:
+        report = bimodality_report(elites)
+        fired = [b for b, r in report.items() if r["bimodal"]]
+        for bname, r in report.items():
+            row[f"diag/{bname}/delta_bic"] = r["delta_bic"]
+            row[f"diag/{bname}/separation"] = r["separation"]
+            row[f"diag/{bname}/bimodal"] = int(r["bimodal"])
+        row["diag/bimodal_frac"] = len(fired) / len(report)
+        row["diag/n_elites"] = n_elite
+        row["diag/underpowered"] = int(n_elite < MIN_POOL)
+        if n_elite < MIN_POOL:
+            print(f"  diag: UNDERPOWERED ({n_elite} elites < {MIN_POOL}) "
+                  f"-- 'unimodal' here is not evidence")
+        if fired:
+            print(f"  diag: BIMODAL blocks {fired} -- "
+                  f"crossover_frac has its evidence gate")
 
     wandb_run.log(row)
     gen_log.write(json.dumps(row) + "\n")
@@ -357,6 +413,24 @@ if clean is not None:
 
 with open(os.path.join(OUTPUT, "results.json"), "w") as f:
     json.dump(results, f, indent=2)
+
+# Per-cell clean scores, byte-compatible with finish_run's clean_scores.json
+# (search/cem.py): runs sharing reference pool and clean seeds produce
+# aligned cell lists, which is what `python -m search.restarts --cells a,b`
+# needs to pair them -- and pairing is what makes a crossover-vs-control
+# comparison on Kaggle a measurement instead of two noisy numbers.
+if clean is not None:
+    with open(os.path.join(OUTPUT, "clean_scores.json"), "w") as f:
+        json.dump({
+            "group": group,
+            "selection_metric": sel_key,
+            "selection_score": best_holdout,
+            "clean_mean_bank": clean["mean_bank"],
+            "cell_labels": [[label, seed, seat]
+                            for _, label, seed, seat in clean_cells],
+            "clean_banks": clean["banks"],
+            "clean_margins": clean["margins"],
+        }, f, indent=1)
 
 gen_log.close()
 

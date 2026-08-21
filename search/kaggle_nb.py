@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,28 @@ def _kaggle_username():
 
 def _kernel_slug(username):
     return f"{username}/{KERNEL_SLUG_SUFFIX}"
+
+
+def _run_slug(username, group):
+    """A FRESH kernel slot for every run, never a new version of an old one.
+
+    Pushing new code to an existing slug creates a new VERSION of that
+    kernel, and Kaggle surfaces the previous version's logs and output until
+    the new version completes -- observed 2026-08-21: a run reusing the slug
+    showed only the prior run's logs, which is exactly the shape of bug rule
+    7 exists for (stale results that look like results). A unique slug per
+    run gives every run its own page and its own output, and it removes the
+    409-on-active-slug conflict outright: two runs can never share a slot,
+    whatever their tiers or timing.
+
+    The timestamp disambiguates same-group re-runs; the group keeps the slot
+    findable next to runs/<group>/. Kaggle caps slugs at 50 chars, so the
+    group part is truncated to fit.
+    """
+    stamp = time.strftime("%m%d-%H%M")
+    base = re.sub(r"[^a-z0-9-]+", "-", group.lower()).strip("-")
+    base = base[:50 - len("farmermaxxing--") - len(stamp)].rstrip("-")
+    return f"{username}/farmermaxxing-{base}-{stamp}"
 
 
 def _wandb_api_key():
@@ -89,7 +112,7 @@ def _build_tarball_bytes(config_dict):
             tar.add(src, arcname=dirname, filter=_pycache_filter)
         # Selected search files — only the ones the kernel imports
         for fname in ("cem.py", "league.py", "modal_app.py",
-                      "kernel_config.py"):
+                      "kernel_config.py", "blocks.py"):
             src = os.path.join(REPO, "search", fname)
             if os.path.exists(src):
                 tar.add(src, arcname=f"search/{fname}",
@@ -366,6 +389,7 @@ def log_results_to_wandb(run_dir, group, config):
         results = json.load(f)
 
     with wandb_setup.start("cem", group=group, tags=["cem", "kaggle"],
+                           step_metric="gen",
                            config={**config, "backend": "kaggle"}) as run:
         # Replay per-generation metrics
         if os.path.exists(gen_path):
@@ -425,11 +449,22 @@ def run_cem_on_kaggle(cfg):
     group = config["group"]
     run_dir = os.path.join(RUNS_DIR, group)
 
+    # `machine` stays IN the shipped config: the kernel re-checks the tier it
+    # actually landed on (sched_getaffinity) and refuses a silent downgrade.
+    # enable_tpu as kernel metadata is the mechanism the TPU probe validated
+    # (search/kaggle_tpu_probe.py; measured 96 cores, 67.5 eps/s, ~9 min
+    # queue for a slot, ~20h/week quota).
+    on_tpu = config["machine"] == "tpu"
+    slug = _run_slug(username, group)
+    extra_meta = {"enable_tpu": "true"} if on_tpu else None
+
     print(f"=== Kaggle CEM: {group} ===")
     print(f"  generations: {config['generations']}")
     print(f"  population:  {config['population']}")
     print(f"  seeds:       {config['seeds']}")
     print(f"  opponents:   {config['opponents']}")
+    print(f"  machine:     {config['machine']}"
+          + ("  (expect ~9 min queueing for a TPU slot)" if on_tpu else ""))
     print()
 
     # Step 1: Build the self-extracting kernel script
@@ -448,20 +483,22 @@ def run_cem_on_kaggle(cfg):
     # Step 2: Push
     os.makedirs(STAGING_DIR, exist_ok=True)
     print("pushing kernel...")
-    push_kernel(username, script)
+    push_kernel(username, script, slug=slug, extra_meta=extra_meta)
 
-    # Step 3: Poll until done
+    # Step 3: Poll until done. The same slug threads through poll and
+    # download, or a TPU run would poll the CPU kernel's (possibly running)
+    # slot and fetch someone else's output.
     print(f"polling (timeout 2h, interval 30s)...")
-    status = poll(username, interval=30, timeout=7200)
+    status = poll(username, interval=30, timeout=7200, slug=slug)
 
     if status != "complete":
         print(f"kernel did not complete: {status}")
-        print(f"  check logs: kaggle kernels output {_kernel_slug(username)}")
+        print(f"  check logs: kaggle kernels output {slug}")
         sys.exit(1)
 
     # Step 4: Download results
     print("downloading results...")
-    best_path = download(username, run_dir)
+    best_path = download(username, run_dir, slug=slug)
 
     if best_path:
         print(f"\nbest_params.json: {best_path}")
