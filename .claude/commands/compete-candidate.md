@@ -1,6 +1,6 @@
 ---
 description: Judge a candidate against the prize band, with opponents held out
-argument-hint: [path to params.json] [--trained-on tape:a,tape:b]
+argument-hint: [path to params.json] [TRAINED_ON=tape:a,tape:b]
 allowed-tools: Bash(make gate:*), Bash(make mix:*), Bash(make meta-gap:*), Bash(.venv/bin/python -m sim.gate:*), Bash(.venv/bin/python -m sim.mix:*), Read
 ---
 

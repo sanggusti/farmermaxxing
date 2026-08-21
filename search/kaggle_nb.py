@@ -4,7 +4,8 @@ Replaces Modal as the cloud compute backend. Kaggle provides unlimited free CPU
 quota (4 cores, 30 GB RAM, 12-hour sessions). A full CEM run (~7,200 episodes)
 takes about 40 minutes — well within limits, and $0.
 
-    python -m search.cem --kaggle --generations 10 --population 48 --seeds 6
+    python -m search.cem backend=kaggle generations=10 population=48 seeds=6
+    python -m search.cem backend=kaggle +experiment=smoke
 
 The kernel script is generated dynamically with all code and configuration
 embedded as a base64-encoded tarball. No separate dataset needed — everything
@@ -87,7 +88,8 @@ def _build_tarball_bytes(config_dict):
             src = os.path.join(REPO, dirname)
             tar.add(src, arcname=dirname, filter=_pycache_filter)
         # Selected search files — only the ones the kernel imports
-        for fname in ("cem.py", "league.py", "modal_app.py"):
+        for fname in ("cem.py", "league.py", "modal_app.py",
+                      "kernel_config.py"):
             src = os.path.join(REPO, "search", fname)
             if os.path.exists(src):
                 tar.add(src, arcname=f"search/{fname}",
@@ -200,9 +202,15 @@ with open(os.path.join(CODE, "cem_config.json")) as f:
 # Kernel push / poll / download
 # ---------------------------------------------------------------------------
 
-def push_kernel(username, script_content):
-    """Write the generated kernel script and push it."""
-    kernel_staging = os.path.join(STAGING_DIR, "kernel")
+def push_kernel(username, script_content, slug=None, extra_meta=None):
+    """Write the generated kernel script and push it.
+
+    `slug`/`extra_meta` let another workload (the TPU probe) reuse this under
+    its own kernel slot instead of clobbering a possibly-running CEM kernel
+    (pushes to an active slug 409 and then overwrite it on retry).
+    """
+    slug = slug or _kernel_slug(username)
+    kernel_staging = os.path.join(STAGING_DIR, slug.rsplit("/", 1)[-1])
     os.makedirs(kernel_staging, exist_ok=True)
 
     # Write the generated script
@@ -212,8 +220,8 @@ def push_kernel(username, script_content):
 
     # Write kernel metadata — no dataset sources needed
     meta = {
-        "id": _kernel_slug(username),
-        "title": "farmermaxxing cem search",
+        "id": slug,
+        "title": slug.rsplit("/", 1)[-1].replace("-", " "),
         "code_file": "cem_kernel.py",
         "language": "python",
         "kernel_type": "script",
@@ -223,6 +231,7 @@ def push_kernel(username, script_content):
         "dataset_sources": [],
         "competition_sources": [],
         "kernel_sources": [],
+        **(extra_meta or {}),
     }
     with open(os.path.join(kernel_staging, "kernel-metadata.json"), "w") as f:
         json.dump(meta, f, indent=2)
@@ -246,12 +255,12 @@ def push_kernel(username, script_content):
             print(f"kernel push failed:\n  stdout: {stdout}\n  stderr: {stderr}")
             raise subprocess.CalledProcessError(result.returncode,
                                                 result.args, stdout, stderr)
-    print(f"kernel pushed: {_kernel_slug(username)}")
+    print(f"kernel pushed: {slug}")
 
 
-def poll(username, interval=30, timeout=7200):
+def poll(username, interval=30, timeout=7200, slug=None):
     """Poll kernel status until completion or timeout."""
-    slug = _kernel_slug(username)
+    slug = slug or _kernel_slug(username)
     deadline = time.time() + timeout
     last_status = None
 
@@ -280,10 +289,10 @@ def poll(username, interval=30, timeout=7200):
     return "timeout"
 
 
-def download(username, run_dir):
+def download(username, run_dir, slug=None):
     """Download kernel output to the run directory."""
     os.makedirs(run_dir, exist_ok=True)
-    slug = _kernel_slug(username)
+    slug = slug or _kernel_slug(username)
 
     subprocess.run(
         ["kaggle", "kernels", "output", slug, "-p", run_dir],
@@ -384,37 +393,34 @@ def log_results_to_wandb(run_dir, group, config):
 
 
 # ---------------------------------------------------------------------------
-# Main entry point (called from cem.py --kaggle)
+# Main entry point (called from cem.py when backend=kaggle)
 # ---------------------------------------------------------------------------
 
-def run_cem_on_kaggle(args):
-    """Package, push, poll, download — the full Kaggle CEM workflow."""
+def run_cem_on_kaggle(cfg):
+    """Package, push, poll, download — the full Kaggle CEM workflow.
+
+    `cfg` is the COMPOSED configs/cem.yaml (an omegaconf DictConfig), shipped
+    whole. The predecessor of this function hand-copied 14 named args into a
+    dict, so a flag it had not been taught (--ramp) was dropped WITHOUT ERROR;
+    search/kernel_config.py now makes the kernel refuse any key mismatch
+    instead, in its first minute.
+    """
+    from omegaconf import OmegaConf   # driver-side only; not in the kernel
+
     username = _kaggle_username()
 
-    config = {
-        "generations": args.generations,
-        "population": args.population,
-        "elite_frac": args.elite_frac,
-        "seeds": args.seeds,
-        "train_pool": args.train_pool,
-        "holdout_seeds": args.holdout_seeds,
-        "clean_seeds": args.clean_seeds,
-        "steps": args.steps,
-        "opponents": args.opponents or args.opponent,
-        "reference": args.reference,
-        "fitness": args.fitness,
-        "holdout_opponents": args.holdout_opponents,
-        "rng_seed": args.rng_seed,
-        "group": args.group or f"cem-kaggle-g{args.generations}-p{args.population}",
-    }
+    config = OmegaConf.to_container(cfg, resolve=True)
+    config.pop("backend")   # consumed by the routing in search.cem.main
+    config["group"] = (config["group"]
+                       or f"cem-kaggle-g{cfg.generations}-p{cfg.population}")
 
     # Embed init params data if provided (paths don't transfer)
-    if args.init_params:
+    init_params = config.pop("init_params")
+    if init_params:
         sys.path[:0] = [REPO, os.path.join(REPO, "agent")]
         from params import Params
-        p = Params.from_json(args.init_params)
+        p = Params.from_json(init_params)
         config["init_params_data"] = p.__dict__
-        config["init_spread"] = args.init_spread
 
     group = config["group"]
     run_dir = os.path.join(RUNS_DIR, group)
@@ -427,12 +433,12 @@ def run_cem_on_kaggle(args):
     print()
 
     # Step 1: Build the self-extracting kernel script
-    wandb_key = None if args.no_wandb else _wandb_api_key()
+    wandb_key = _wandb_api_key() if cfg.wandb else None
     print("building kernel script with embedded code...")
     if wandb_key:
         print("  W&B: offline logging on Kaggle, sync after download")
     else:
-        print("  W&B: disabled" + (" (--no-wandb)" if args.no_wandb else " (no key found)"))
+        print("  W&B: disabled" + (" (no key found)" if cfg.wandb else " (wandb=false)"))
     tarball_bytes = _build_tarball_bytes(config)
     tarball_b64 = base64.b64encode(tarball_bytes).decode()
     script = _generate_kernel_script(tarball_b64, wandb_api_key=wandb_key)
@@ -471,10 +477,10 @@ def run_cem_on_kaggle(args):
             print(f"wall:    {results.get('wall_seconds', 0):.0f}s")
 
     # Step 5: Sync W&B
-    if not args.no_wandb and wandb_key:
+    if cfg.wandb and wandb_key:
         # The kernel logged offline to wandb/ dir. Sync it now.
         _sync_wandb_offline(run_dir, wandb_key)
-    elif not args.no_wandb:
+    elif cfg.wandb:
         # No API key — replay from generations.jsonl
         results_path = os.path.join(run_dir, "results.json")
         if os.path.exists(results_path):
@@ -493,8 +499,14 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     if args.test_package:
-        config = {"generations": 1, "population": 4, "seeds": 1,
-                  "opponents": "starter", "group": "test"}
+        # Size the REAL composed config, not a stub: the config travels in
+        # the tarball, so the size check should see what actually ships.
+        from hydra import compose, initialize_config_dir
+        from omegaconf import OmegaConf
+        with initialize_config_dir(config_dir=os.path.join(REPO, "configs"),
+                                   version_base=None):
+            config = OmegaConf.to_container(compose(config_name="cem"),
+                                            resolve=True)
         tb = _build_tarball_bytes(config)
         b64 = base64.b64encode(tb).decode()
         script = _generate_kernel_script(b64)

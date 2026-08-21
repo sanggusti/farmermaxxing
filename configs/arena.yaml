@@ -1,0 +1,17 @@
+# python -m sim.arena [key=value ...]     (make arena wraps this)
+defaults:
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+seeds: 8
+opponents: starter    # built-ins, frozen snapshot names, or "all"/"frozen"
+steps: 720
+params: null          # params.json to evaluate; null -> Params() defaults
+wandb: false
+group: null
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

@@ -33,11 +33,12 @@ scoring (common random numbers within a generation), per-cell z-score fitness,
 rotating train seeds, holdout selection with the worst-opponent guard, and the
 shared finish_run clean-eval contract.
 
-    python -m search.cmaes --generations 20 --seeds 2                     # local
-    python -m search.cmaes --generations 600 --popsize 16 --seeds 2 --modal
+Configuration composes from configs/cmaes.yaml (issue #98):
+
+    python -m search.cmaes generations=20 seeds=2                     # local
+    python -m search.cmaes backend=modal generations=600 popsize=16 seeds=2
 """
 
-import argparse
 import contextlib
 import math
 import os
@@ -97,73 +98,43 @@ def make_es(x0, spread, popsize, seed):
     })
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--generations", type=int, default=40)
-    ap.add_argument("--popsize", type=int, default=0,
-                    help="lambda; 0 means CMA-ES's own default "
-                         f"4 + floor(3 ln n) = {default_popsize()} at n={len(NAMES)}")
-    ap.add_argument("--seeds", type=int, default=2, help="train seeds per gen")
-    ap.add_argument("--train-pool", type=int, default=TRAIN_POOL)
-    ap.add_argument("--holdout-seeds", type=int, default=6)
-    ap.add_argument("--clean-seeds", type=int, default=8)
-    ap.add_argument("--holdout-every", type=int, default=8,
-                    help="holdout-score the generation's train-best every N "
-                         "generations. At 600 generations, every generation "
-                         "would spend more episodes selecting than training; "
-                         "every 8th keeps selection under a quarter of the "
-                         "budget while still sampling the whole run")
-    ap.add_argument("--steps", type=int, default=720)
-    ap.add_argument("--opponent", default="starter")
-    ap.add_argument("--opponents", default=None,
-                    help="pool spec for TRAINING; overrides --opponent")
-    ap.add_argument("--reference", default=None,
-                    help="pool spec for SELECTION and reporting; defaults to "
-                         "--opponents, held fixed across the run")
-    ap.add_argument("--holdout-opponents", type=int, default=0,
-                    help="withhold N opponents from training, keep them in "
-                         "the reference pool (same semantics as search.cem)")
-    ap.add_argument("--fitness", choices=("bank", "margin"), default="bank")
-    ap.add_argument("--modal", action="store_true", help="fan out on Modal")
-    ap.add_argument("--rng-seed", type=int, default=1,
-                    help="seeds both the opponent hold-out draw and cma "
-                         "(default 1: cma treats a falsy seed as 'use the "
-                         "clock', which would make runs unreproducible)")
-    ap.add_argument("--group", default=None)
-    ap.add_argument("--no-wandb", action="store_true")
-    ap.add_argument("--init-params", default=None,
-                    help="warm-start x0 from this params.json")
-    ap.add_argument("--init-spread", type=float, default=None,
-                    help="per-dim sigma as a fraction of each range "
-                         "(default 0.25 cold, 0.10 warm), via CMA_stds")
-    args = ap.parse_args()
+def main(cfg):
+    """Run the search described by `cfg` (composed from configs/cmaes.yaml)."""
+    from omegaconf import OmegaConf   # driver-side only, like hydra below
 
-    if args.no_wandb:
+    if cfg.backend == "kaggle":
+        raise SystemExit("error: backend=kaggle is CEM-only; there is no "
+                         "cmaes kernel (search/kaggle_notebook/cem_kernel.py)")
+    if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
-    if args.train_pool >= HOLDOUT_OFFSET:
-        ap.error(f"--train-pool {args.train_pool} overlaps with holdout seeds")
-    if args.train_pool < args.seeds:
-        ap.error(f"--train-pool {args.train_pool} < --seeds {args.seeds}")
-    if not args.rng_seed:
-        ap.error("--rng-seed 0 would hand cma a clock-based seed; use >= 1")
+    if cfg.train_pool >= HOLDOUT_OFFSET:
+        raise SystemExit(f"error: train_pool {cfg.train_pool} overlaps with "
+                         f"holdout seeds")
+    if cfg.train_pool < cfg.seeds:
+        raise SystemExit(f"error: train_pool {cfg.train_pool} < seeds "
+                         f"{cfg.seeds}")
+    if not cfg.rng_seed:
+        raise SystemExit("error: rng_seed 0 would hand cma a clock-based "
+                         "seed; use >= 1")
 
-    popsize = args.popsize or default_popsize()
-    rng = random.Random(args.rng_seed)
-    holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
-    clean_seeds = [CLEAN_OFFSET + i for i in range(args.clean_seeds)]
+    popsize = cfg.popsize or default_popsize()
+    rng = random.Random(cfg.rng_seed)
+    holdout_seeds = [HOLDOUT_OFFSET + i for i in range(cfg.holdout_seeds)]
+    clean_seeds = [CLEAN_OFFSET + i for i in range(cfg.clean_seeds)]
 
     # Pool resolution and opponent hold-out: same semantics as search.cem.
-    train_pool_spec = args.opponents or args.opponent
-    ref_pool_spec = args.reference or train_pool_spec
+    train_pool_spec = cfg.opponents
+    ref_pool_spec = cfg.reference or train_pool_spec
     train_opps, train_labels = resolve_pool(train_pool_spec)
     ref_opps, ref_labels = resolve_pool(ref_pool_spec)
     heldout_labels = []
-    if args.holdout_opponents > 0:
-        if args.holdout_opponents >= len(train_labels):
-            ap.error(f"--holdout-opponents {args.holdout_opponents} leaves "
-                     f"nothing to train on ({len(train_labels)} in the pool)")
+    if cfg.holdout_opponents > 0:
+        if cfg.holdout_opponents >= len(train_labels):
+            raise SystemExit(f"error: holdout_opponents "
+                             f"{cfg.holdout_opponents} leaves nothing to "
+                             f"train on ({len(train_labels)} in the pool)")
         drop = sorted(rng.sample(range(len(train_labels)),
-                                 args.holdout_opponents))
+                                 cfg.holdout_opponents))
         heldout_labels = [train_labels[i] for i in drop]
         train_opps = [o for i, o in enumerate(train_opps) if i not in drop]
         train_labels = [l for i, l in enumerate(train_labels) if i not in drop]
@@ -172,46 +143,44 @@ def main():
 
     holdout_cells = build_cells(ref_opps, ref_labels, holdout_seeds)
     clean_cells = build_cells(ref_opps, ref_labels, clean_seeds)
-    if args.init_params:
-        base = Params.from_json(args.init_params)
-        spread = args.init_spread if args.init_spread is not None else 0.10
+    if cfg.init_params:
+        base = Params.from_json(cfg.init_params)
+        spread = cfg.init_spread if cfg.init_spread is not None else 0.10
     else:
         base = Params()
-        spread = args.init_spread if args.init_spread is not None else 0.25
-    score = score_modal if args.modal else score_local
-    backend_session = modal_session() if args.modal else contextlib.nullcontext()
+        spread = cfg.init_spread if cfg.init_spread is not None else 0.25
+    on_modal = cfg.backend == "modal"
+    score = score_modal if on_modal else score_local
+    backend_session = modal_session() if on_modal else contextlib.nullcontext()
 
-    group = args.group or f"cmaes-g{args.generations}-p{popsize}"
+    group = cfg.group or f"cmaes-g{cfg.generations}-p{popsize}"
     run_dir = os.path.join(RUNS_DIR, group)
     os.makedirs(run_dir, exist_ok=True)
     best_path = os.path.join(run_dir, "best_params.json")
 
-    key = "margins" if args.fitness == "margin" else "banks"
-    sel_key = "mean_margin" if args.fitness == "margin" else "mean_bank"
+    key = "margins" if cfg.fitness == "margin" else "banks"
+    sel_key = "mean_margin" if cfg.fitness == "margin" else "mean_bank"
 
-    es = make_es(vec_to_x(flatten(base)), spread, popsize, args.rng_seed)
+    es = make_es(vec_to_x(flatten(base)), spread, popsize, cfg.rng_seed)
 
+    # The FULL composed config plus the derived values (same shape as cem).
     with backend_session, wandb_setup.start("cmaes", group=group,
                                             tags=["cmaes"], config={
-        "generations": args.generations, "popsize": popsize,
-        "train_seeds": args.seeds, "train_pool": args.train_pool,
-        "holdout_seeds": args.holdout_seeds,
-        "holdout_every": args.holdout_every,
-        "fitness": args.fitness,
+        **OmegaConf.to_container(cfg, resolve=True),
+        "popsize": popsize,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
-        "train_cells_per_gen": len(train_opps) * args.seeds * 2,
+        "train_cells_per_gen": len(train_opps) * cfg.seeds * 2,
         "train_episodes_total":
-            popsize * len(train_opps) * args.seeds * 2 * args.generations,
-        "backend": "modal" if args.modal else "local",
-        "init_params": args.init_params or "defaults", "init_spread": spread,
+            popsize * len(train_opps) * cfg.seeds * 2 * cfg.generations,
+        "init_params": cfg.init_params or "defaults", "init_spread": spread,
     }) as run:
 
         # The incumbent guarantee, stronger than CEM's population injection:
         # x0 is holdout-scored up front and becomes the number to beat, so
         # the run can never report a champion worse than its warm start.
         base_vec = flatten(base)
-        base_stats = score([base_vec], holdout_cells, args.steps,
+        base_stats = score([base_vec], holdout_cells, cfg.steps,
                            metrics=True)[0]
         best_holdout = selection_score(base_stats, sel_key)
         best_vec = base_vec
@@ -221,17 +190,17 @@ def main():
         print(f"warm start  holdout {base_stats['mean_bank']:>11,.0f}  "
               f"selection {best_holdout:>11,.0f}")
 
-        for gen in range(args.generations):
+        for gen in range(cfg.generations):
             xs = es.ask()
             population = [x_to_vec(x) for x in xs]
 
             # Same rotation as search.cem (issue #68): fresh block per
             # generation, common random numbers within one.
-            train_seeds = [(gen * args.seeds + i) % args.train_pool
-                           for i in range(args.seeds)]
+            train_seeds = [(gen * cfg.seeds + i) % cfg.train_pool
+                           for i in range(cfg.seeds)]
             train_cells = build_cells(train_opps, train_labels, train_seeds)
 
-            stats = score(population, train_cells, args.steps)
+            stats = score(population, train_cells, cfg.steps)
             fitness = normalised_fitness([s[key] for s in stats])
             # cma minimises; CMA-ES is rank-based, so the per-cell z-scores
             # are a legal objective and keep the mixed-pool balance rationale
@@ -260,10 +229,10 @@ def main():
             # one of 600 generations would spend more on selecting than on
             # searching (and take 600 maxima over holdout noise -- the
             # selection bias grows with every max taken).
-            is_last = gen == args.generations - 1
-            if gen % args.holdout_every == 0 or is_last:
+            is_last = gen == cfg.generations - 1
+            if gen % cfg.holdout_every == 0 or is_last:
                 cand_vec = train_rank[0][2]
-                cand_stats = score([cand_vec], holdout_cells, args.steps,
+                cand_stats = score([cand_vec], holdout_cells, cfg.steps,
                                    metrics=True)[0]
                 cand_sel = selection_score(cand_stats, sel_key)
                 worst_label, worst_margin = worst_opponent(cand_stats)
@@ -294,11 +263,15 @@ def main():
         run.summary["final_sigma"] = float(es.sigma)
         run.summary["final_axis_ratio"] = float(max(es.D) / min(es.D))
         finish_run(run, best_vec=best_vec, best_holdout=best_holdout,
-                   best_train=best_train, fitness=args.fitness, score_fn=score,
-                   clean_cells=clean_cells, steps=args.steps,
+                   best_train=best_train, fitness=cfg.fitness, score_fn=score,
+                   clean_cells=clean_cells, steps=cfg.steps,
                    heldout_labels=heldout_labels, run_dir=run_dir, group=group,
                    best_path=best_path)
 
 
 if __name__ == "__main__":
-    main()
+    # Deferred decoration: importing this module must never require hydra
+    # (search.subspace imports NAMES/LOS/HIS from here) -- only running does.
+    import hydra
+    hydra.main(config_path=os.path.join(REPO, "configs"),
+               config_name="cmaes", version_base=None)(main)()

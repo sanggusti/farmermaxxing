@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """CEM search running inside a Kaggle CPU notebook.
 
-Mirrors the generation loop in search.cem.main() but reads config from a JSON
-file (no argparse) and writes output to /kaggle/working/ (no W&B streaming).
-The local orchestrator (search.kaggle_nb) pushes this script, polls for
-completion, and downloads the results.
+Mirrors the generation loop in search.cem.main() but reads config from
+cem_config.json (the COMPOSED configs/cem.yaml, shipped whole -- validated by
+search.kernel_config so a key mismatch fails in the first minute) and writes
+output to /kaggle/working/. The local orchestrator (search.kaggle_nb) pushes
+this script, polls for completion, downloads the results, and syncs the
+offline W&B run.
 
-The code itself travels as a tarball in a Kaggle dataset mounted at
-/kaggle/input/farmermaxxing-cem-code/. This keeps the notebook thin and the
-code byte-identical to what runs locally.
+Only the part from the "# 4. Imports" marker down actually ships: the
+orchestrator's _generate_kernel_script slices there and prepends its own
+self-extracting preamble (base64 tarball -> /tmp/fm, sys.path, cfg =
+json.load). Sections 1-3 below exist so this file also runs standalone
+against a mounted dataset, the pre-base64 delivery path.
 """
 
 import json
@@ -84,10 +88,10 @@ from sim.arena import CENSUS_KEYS as ARENA_CENSUS_KEYS        # noqa: E402
 from search.league import (build_cells, normalised_fitness,   # noqa: E402
                            worst_opponent)
 from search.cem import (                                      # noqa: E402
-    initial_distribution, sample, refit,
-    selection_score, HOLDOUT_OFFSET, CLEAN_OFFSET,
-    WORST_TOLERANCE, WORST_TOLERANCE_FLOOR,
+    initial_distribution, sample, refit, ramp_schedule,
+    selection_score, worst_tolerance, HOLDOUT_OFFSET, CLEAN_OFFSET,
 )
+from search.kernel_config import resolve_cem_config            # noqa: E402
 from search.modal_app import summarise_cells                   # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -144,26 +148,42 @@ def score_local(vectors, cells, steps, metrics=False):
 # ---------------------------------------------------------------------------
 OUTPUT = "/kaggle/working"
 
+# The config is the full composed configs/cem.yaml, so every key is indexed
+# directly: a missing key is a loud KeyError, never a shadow default that can
+# drift from the yaml. resolve_cem_config already refused any key mismatch.
+cfg = resolve_cem_config(cfg)
+
 generations = cfg["generations"]
 population = cfg["population"]
-elite_frac = cfg.get("elite_frac", 0.25)
+elite_frac = cfg["elite_frac"]
 seeds = cfg["seeds"]
-train_pool_size = cfg.get("train_pool", 1000)
-holdout_seeds_n = cfg.get("holdout_seeds", 6)
-clean_seeds_n = cfg.get("clean_seeds", 8)
-steps = cfg.get("steps", 720)
-fitness_key = cfg.get("fitness", "bank")
-holdout_opponents_n = cfg.get("holdout_opponents", 0)
-rng_seed = cfg.get("rng_seed", 0)
-group = cfg.get("group", "cem-kaggle")
+train_pool_size = cfg["train_pool"]
+holdout_seeds_n = cfg["holdout_seeds"]
+clean_seeds_n = cfg["clean_seeds"]
+steps = cfg["steps"]
+fitness_key = cfg["fitness"]
+holdout_opponents_n = cfg["holdout_opponents"]
+rng_seed = cfg["rng_seed"]
+group = cfg["group"]
+
+# Same ramp semantics as search.cem.main: the schedule sums to
+# generations * seeds exactly, and at ramp=1.0 the cumulative starts make
+# this bit-for-bit the legacy (gen * seeds + i) % pool rotation (pinned by
+# test_constant_ramp_reproduces_legacy_formula). The old kernel silently ran
+# the constant allocation whatever ramp was asked for -- the founding case
+# for the resolve_cem_config unknown-key check above.
+seeds_schedule = ramp_schedule(generations, seeds, cfg["ramp"])
+seed_starts = [0]
+for n in seeds_schedule:
+    seed_starts.append(seed_starts[-1] + n)
 
 rng = random.Random(rng_seed)
 holdout_seeds = [HOLDOUT_OFFSET + i for i in range(holdout_seeds_n)]
 clean_seeds = [CLEAN_OFFSET + i for i in range(clean_seeds_n)]
 
 # Resolve opponent pools
-train_pool_spec = cfg.get("opponents") or cfg.get("opponent", "starter")
-ref_pool_spec = cfg.get("reference") or train_pool_spec
+train_pool_spec = cfg["opponents"]
+ref_pool_spec = cfg["reference"] or train_pool_spec
 train_opps, train_labels = resolve_pool(train_pool_spec)
 ref_opps, ref_labels = resolve_pool(ref_pool_spec)
 
@@ -182,13 +202,13 @@ holdout_cells = build_cells(ref_opps, ref_labels, holdout_seeds)
 clean_cells = build_cells(ref_opps, ref_labels, clean_seeds)
 
 # Warm start or cold start
-init_params_data = cfg.get("init_params_data")
+init_params_data = cfg["init_params_data"]
 if init_params_data:
     base = Params(**init_params_data)
-    spread = cfg.get("init_spread") or 0.10
+    spread = cfg["init_spread"] if cfg["init_spread"] is not None else 0.10
 else:
     base = Params()
-    spread = cfg.get("init_spread") or 0.25
+    spread = cfg["init_spread"] if cfg["init_spread"] is not None else 0.25
 
 mean, std = initial_distribution(base, spread)
 n_elite = max(2, int(population * elite_frac))
@@ -202,19 +222,22 @@ best_worst = None
 gen_log = open(os.path.join(OUTPUT, "generations.jsonl"), "w")
 t0 = time.time()
 
-# W&B live tracking — streams per-generation metrics in real time.
-# When WANDB_MODE=disabled (no API key), wandb_setup.start() returns a
-# _NullRun whose .log() is a no-op, so the code below never branches.
+# W&B (offline on Kaggle; the orchestrator syncs after download). When
+# WANDB_MODE=disabled (no API key), wandb_setup.start() returns a _NullRun
+# whose .log() is a no-op, so the code below never branches.
+# The FULL shipped config plus the derived values, matching the local driver;
+# init_params_data is a whole parameter set, summarised as a flag instead.
 wandb_run = wandb_setup.start("cem", group=group, tags=["cem", "kaggle"], config={
-    "generations": generations, "population": population,
-    "elite_frac": elite_frac, "train_seeds": seeds,
-    "train_pool": train_pool_size,
-    "holdout_seeds": holdout_seeds_n,
-    "fitness": fitness_key,
+    **{k: v for k, v in cfg.items() if k != "init_params_data"},
+    "init_params": "inline" if init_params_data else "defaults",
+    "init_spread": spread,
     "train_opponents": train_labels, "reference_opponents": ref_labels,
     "heldout_opponents": heldout_labels,
+    "train_cells_per_gen": len(train_opps) * seeds * 2,
+    "seeds_schedule": seeds_schedule,
+    "train_episodes_total":
+        population * len(train_opps) * 2 * sum(seeds_schedule),
     "backend": "kaggle",
-    "init_spread": spread,
 })
 
 for gen in range(generations):
@@ -223,8 +246,10 @@ for gen in range(generations):
     if gen == 0:
         population_vecs[0] = flatten(base)
 
-    # Rotate training seeds
-    train_seeds = [(gen * seeds + i) % train_pool_size for i in range(seeds)]
+    # Rotate training seeds; the count comes from the ramp schedule, the
+    # cumulative start keeps blocks consecutive (same as search.cem.main).
+    train_seeds = [(seed_starts[gen] + i) % train_pool_size
+                   for i in range(seeds_schedule[gen])]
     train_cells = build_cells(train_opps, train_labels, train_seeds)
 
     stats = score_local(population_vecs, train_cells, steps)
@@ -239,12 +264,11 @@ for gen in range(generations):
                          key=lambda sp: -selection_score(sp[0], sel_key))
     champion_stats, champion_vec = hold_ranked[0]
 
-    # Worst-opponent guard
+    # Worst-opponent guard, via the shared helper so the tolerance cannot
+    # drift from the other drivers (cmaes and subspace already import it).
     worst_label, worst_margin = worst_opponent(champion_stats)
-    tolerance = max(WORST_TOLERANCE * abs(best_worst or 0.0),
-                    WORST_TOLERANCE_FLOOR)
     regressed = (best_worst is not None
-                 and worst_margin < best_worst - tolerance)
+                 and worst_margin < best_worst - worst_tolerance(best_worst))
     if selection_score(champion_stats, sel_key) > best_holdout and not regressed:
         best_holdout = selection_score(champion_stats, sel_key)
         best_worst = (worst_margin if best_worst is None
@@ -279,6 +303,12 @@ for gen in range(generations):
         row[f"vs/{label}/mean_bank"] = b["mean_bank"]
         row[f"vs/{label}/win_rate"] = b["win_rate"]
     row["worst_opponent_margin"] = worst_margin
+    # The ramp's audit trail, same as the local driver: cumulative episodes
+    # must land on exactly population * opps * 2 * generations * seeds.
+    row["train_seeds_this_gen"] = seeds_schedule[gen]
+    row["episodes_this_gen"] = population * len(train_cells)
+    row["cum_train_episodes"] = (
+        population * len(train_opps) * 2 * seed_starts[gen + 1])
     row["wall_seconds"] = time.time() - gt
 
     wandb_run.log(row)

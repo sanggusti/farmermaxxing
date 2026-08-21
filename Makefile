@@ -8,7 +8,7 @@ AGENT_FILES := main.py policy.py params.py market.py rules.py
 
 .PHONY: help setup play trace replay arena freeze promote gate test check \
         search search-modal search-kaggle search-cma search-subspace \
-        bundle submit check-engine leaderboard status clean \
+        probe-tpu bundle submit check-engine leaderboard status clean \
         ladder-sync calibrate slots meta-gap mix refresh-tapes preflight ledger
 
 help:  ## Show this help
@@ -33,7 +33,7 @@ replay:  ## Episode + replay JSON for the visualiser
 
 # ------------------------------------------------------------------ evaluation
 arena:  ## Holdout matrix vs the full opponent pool (add WANDB=1 to log)
-	$(PY) -m sim.arena --seeds 8 --opponents all $(if $(WANDB),--wandb,)
+	$(PY) -m sim.arena seeds=8 opponents=all $(if $(WANDB),wandb=true,)
 
 freeze:  ## Snapshot agent/params.json into the opponent pool. NAME=v1-cem
 	@if [ -z "$(NAME)" ]; then echo 'set NAME=<snapshot-name>'; exit 1; fi
@@ -44,11 +44,15 @@ promote:  ## Copy a search result into agent/params.json. FROM=runs/.../best_par
 	@cp $(FROM) agent/params.json
 	@echo "promoted $(FROM) -> agent/params.json (run 'make gate' next)"
 
+# Pool specs and trained-on lists carry commas/colons, which Hydra's override
+# grammar reserves (an unquoted a,b is a choice sweep) -- hence the
+# 'key="$(VAR)"' quoting: single quotes for the shell, double for Hydra.
+# POOL/SEEDS fallbacks (top/8) now live in configs/gate.yaml, one home.
 gate:  ## Promotion gate vs the CHAMPION file. POOL=top|band|real  TRAINED_ON=names
-	$(PY) -m sim.gate --candidate agent/params.json \
-	  --opponents $(if $(POOL),$(POOL),top) --seeds $(if $(SEEDS),$(SEEDS),8) \
-	  $(if $(CHAMPION),--champion $(CHAMPION),) \
-	  $(if $(TRAINED_ON),--trained-on $(TRAINED_ON),) $(if $(WANDB),--wandb,)
+	$(PY) -m sim.gate candidate=agent/params.json \
+	  $(if $(POOL),'opponents="$(POOL)"',) $(if $(SEEDS),seeds=$(SEEDS),) \
+	  $(if $(CHAMPION),'champion="$(CHAMPION)"',) \
+	  $(if $(TRAINED_ON),'trained_on="$(TRAINED_ON)"',) $(if $(WANDB),wandb=true,)
 
 test:  ## Unit tests: engine parity + submission contract
 	$(PY) -m pytest -q
@@ -77,8 +81,8 @@ refresh-tapes:  ## Mint top-band opponents from a day's episodes. DATE=2026-08-1
 	  --top $(if $(TOP),$(TOP),12) --keep $(if $(KEEP),$(KEEP),8)
 
 meta-gap:  ## Champion vs the prize band, decomposed by product
-	$(PY) -m sim.gate --candidate agent/params.json --opponents top \
-	  --seeds $(if $(SEEDS),$(SEEDS),4)
+	$(PY) -m sim.gate candidate=agent/params.json opponents=top \
+	  seeds=$(if $(SEEDS),$(SEEDS),4)
 
 mix:  ## Our REALISED tile mix beside the opponent's, per day. OPP=tape:meta-a
 	$(PY) -m sim.mix --opponent $(if $(OPP),$(OPP),tape:meta-a) \
@@ -90,20 +94,26 @@ preflight: bundle  ## Everything that must hold before a submission slot is spen
 	@echo "crash-safety and timing vs a real ladder opponent all pass."
 
 # ---------------------------------------------------------------------- search
+# All drivers compose configs/<driver>.yaml; overrides use Hydra's key=value
+# grammar, and EXP=<name> selects a configs/experiment/<name>.yaml.
 search:  ## CEM locally (small; for smoke-testing the loop)
-	$(PY) -m search.cem --generations 4 --population 12 --seeds 3
+	$(PY) -m search.cem generations=4 population=12 seeds=3
 
 search-modal:  ## CEM fanned out on Modal (the real run)
-	$(PY) -m search.cem --generations 10 --population 48 --seeds 6 --modal
+	$(PY) -m search.cem backend=modal generations=10 population=48 seeds=6
 
-search-kaggle:  ## CEM on Kaggle notebook (free, ~40 min)
-	$(PY) -m search.cem --generations 10 --population 48 --seeds 6 --kaggle
+search-kaggle:  ## CEM on Kaggle notebook (free). EXP=smoke picks an experiment file
+	$(PY) -m search.cem backend=kaggle \
+	  $(if $(EXP),+experiment=$(EXP),generations=10 population=48 seeds=6)
 
 search-cma:  ## CMA-ES locally (small; for smoke-testing the loop)
-	$(PY) -m search.cmaes --generations 6 --seeds 2 --holdout-seeds 3 --clean-seeds 3
+	$(PY) -m search.cmaes generations=6 seeds=2 holdout_seeds=3 clean_seeds=3
 
 search-subspace:  ## Random-subspace DFO locally (small; smoke test)
-	$(PY) -m search.subspace --iterations 4 --seeds 2 --holdout-seeds 3 --clean-seeds 3
+	$(PY) -m search.subspace iterations=4 seeds=2 holdout_seeds=3 clean_seeds=3
+
+probe-tpu:  ## Measure usable cores/RAM/episode timing on a Kaggle TPU VM
+	$(PY) -m search.kaggle_tpu_probe
 
 # ------------------------------------------------------------------ submission
 bundle: check  ## Build submission.tar.gz, then validate the archive itself

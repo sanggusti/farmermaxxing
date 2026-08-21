@@ -1,0 +1,25 @@
+# python -m search.cem [key=value ...] [+experiment=<name>]
+defaults:
+  - search_common
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+generations: 8
+population: 24
+elite_frac: 0.25
+# Train seeds per gen (the MEAN per gen when ramp != 1: the total budget is
+# generations * seeds either way).
+seeds: 4
+# First->last ratio of a geometric train-seed ramp (Retrospective
+# Approximation, issue #72). 1.0 keeps the constant allocation; 8.0 starts at
+# ~a third of `seeds` and finishes at ~2.5x it, same total budget to the episode.
+ramp: 1.0
+rng_seed: 0
+
+# No chdir, no outputs/, no .hydra/, no logging reconfiguration: runs/<group>/
+# is the record and the drivers manage their own output.
+hydra:
+  output_subdir: null
+  run:
+    dir: .

@@ -30,11 +30,12 @@ numpy is deliberately used (QR, lstsq): it is already in the venv as cma's
 dependency, and this module runs driver-side only -- workers and the Modal
 image never import it.
 
-    python -m search.subspace --iterations 10 --seeds 2                  # local
-    python -m search.subspace --iterations 40 --seeds 2 --modal
+Configuration composes from configs/subspace.yaml (issue #98):
+
+    python -m search.subspace iterations=10 seeds=2                  # local
+    python -m search.subspace backend=modal iterations=40 seeds=2
 """
 
-import argparse
 import contextlib
 import os
 import random
@@ -151,56 +152,35 @@ def model_step(g, H, radius):
     return radius * g / gn
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--iterations", type=int, default=20,
-                    help="one subspace model per iteration")
-    ap.add_argument("--dim", type=int, default=5,
-                    help="subspace dimension p; the design costs "
-                         "(p+1)(p+2)/2 candidates per iteration")
-    ap.add_argument("--radius", type=float, default=0.1,
-                    help="initial trust-region radius in unit-cube units")
-    ap.add_argument("--extra-points", type=int, default=0,
-                    help="random in-ball design points beyond the 21, making "
-                         "the fit properly least-squares; the dial to turn if "
-                         "per-iteration acceptance thrashes on noise")
-    ap.add_argument("--seeds", type=int, default=2, help="train seeds per iter")
-    ap.add_argument("--train-pool", type=int, default=TRAIN_POOL)
-    ap.add_argument("--holdout-seeds", type=int, default=6)
-    ap.add_argument("--clean-seeds", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=720)
-    ap.add_argument("--opponent", default="starter")
-    ap.add_argument("--opponents", default=None)
-    ap.add_argument("--reference", default=None)
-    ap.add_argument("--holdout-opponents", type=int, default=0)
-    ap.add_argument("--fitness", choices=("bank", "margin"), default="bank")
-    ap.add_argument("--modal", action="store_true")
-    ap.add_argument("--rng-seed", type=int, default=1)
-    ap.add_argument("--group", default=None)
-    ap.add_argument("--no-wandb", action="store_true")
-    ap.add_argument("--init-params", default=None)
-    args = ap.parse_args()
+def main(cfg):
+    """Run the search described by `cfg` (composed from configs/subspace.yaml)."""
+    from omegaconf import OmegaConf   # driver-side only, like hydra below
 
-    if args.no_wandb:
+    if cfg.backend == "kaggle":
+        raise SystemExit("error: backend=kaggle is CEM-only; there is no "
+                         "subspace kernel")
+    if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
-    if args.train_pool >= HOLDOUT_OFFSET:
-        ap.error(f"--train-pool {args.train_pool} overlaps with holdout seeds")
+    if cfg.train_pool >= HOLDOUT_OFFSET:
+        raise SystemExit(f"error: train_pool {cfg.train_pool} overlaps with "
+                         f"holdout seeds")
 
-    rng = random.Random(args.rng_seed)
-    holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
-    clean_seeds = [CLEAN_OFFSET + i for i in range(args.clean_seeds)]
+    rng = random.Random(cfg.rng_seed)
+    holdout_seeds = [HOLDOUT_OFFSET + i for i in range(cfg.holdout_seeds)]
+    clean_seeds = [CLEAN_OFFSET + i for i in range(cfg.clean_seeds)]
 
-    train_pool_spec = args.opponents or args.opponent
-    ref_pool_spec = args.reference or train_pool_spec
+    train_pool_spec = cfg.opponents
+    ref_pool_spec = cfg.reference or train_pool_spec
     train_opps, train_labels = resolve_pool(train_pool_spec)
     ref_opps, ref_labels = resolve_pool(ref_pool_spec)
     heldout_labels = []
-    if args.holdout_opponents > 0:
-        if args.holdout_opponents >= len(train_labels):
-            ap.error(f"--holdout-opponents {args.holdout_opponents} leaves "
-                     f"nothing to train on ({len(train_labels)} in the pool)")
+    if cfg.holdout_opponents > 0:
+        if cfg.holdout_opponents >= len(train_labels):
+            raise SystemExit(f"error: holdout_opponents "
+                             f"{cfg.holdout_opponents} leaves nothing to "
+                             f"train on ({len(train_labels)} in the pool)")
         drop = sorted(rng.sample(range(len(train_labels)),
-                                 args.holdout_opponents))
+                                 cfg.holdout_opponents))
         heldout_labels = [train_labels[i] for i in drop]
         train_opps = [o for i, o in enumerate(train_opps) if i not in drop]
         train_labels = [l for i, l in enumerate(train_labels) if i not in drop]
@@ -209,37 +189,36 @@ def main():
 
     holdout_cells = build_cells(ref_opps, ref_labels, holdout_seeds)
     clean_cells = build_cells(ref_opps, ref_labels, clean_seeds)
-    base = Params.from_json(args.init_params) if args.init_params else Params()
-    score = score_modal if args.modal else score_local
-    backend_session = modal_session() if args.modal else contextlib.nullcontext()
+    base = Params.from_json(cfg.init_params) if cfg.init_params else Params()
+    on_modal = cfg.backend == "modal"
+    score = score_modal if on_modal else score_local
+    backend_session = modal_session() if on_modal else contextlib.nullcontext()
 
-    group = args.group or f"subspace-i{args.iterations}-p{args.dim}"
+    group = cfg.group or f"subspace-i{cfg.iterations}-p{cfg.dim}"
     run_dir = os.path.join(RUNS_DIR, group)
     os.makedirs(run_dir, exist_ok=True)
     best_path = os.path.join(run_dir, "best_params.json")
 
-    key = "margins" if args.fitness == "margin" else "banks"
-    sel_key = "mean_margin" if args.fitness == "margin" else "mean_bank"
-    n_design = (args.dim + 1) * (args.dim + 2) // 2 + args.extra_points
+    key = "margins" if cfg.fitness == "margin" else "banks"
+    sel_key = "mean_margin" if cfg.fitness == "margin" else "mean_bank"
+    n_design = (cfg.dim + 1) * (cfg.dim + 2) // 2 + cfg.extra_points
 
+    # The FULL composed config plus the derived values (same shape as cem).
     with backend_session, wandb_setup.start("subspace", group=group,
                                             tags=["subspace"], config={
-        "iterations": args.iterations, "dim": args.dim,
-        "radius0": args.radius, "design_points": n_design,
-        "train_seeds": args.seeds, "train_pool": args.train_pool,
-        "holdout_seeds": args.holdout_seeds, "fitness": args.fitness,
+        **OmegaConf.to_container(cfg, resolve=True),
+        "design_points": n_design,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
         "train_episodes_total":
-            n_design * len(train_opps) * args.seeds * 2 * args.iterations,
-        "backend": "modal" if args.modal else "local",
-        "init_params": args.init_params or "defaults",
+            n_design * len(train_opps) * cfg.seeds * 2 * cfg.iterations,
+        "init_params": cfg.init_params or "defaults",
     }) as run:
 
         # Incumbent guarantee: the anchor is holdout-scored before anything
         # moves, so the run can never report worse than its warm start.
         anchor_u = np.clip(to_unit(flatten(base)), 0.0, 1.0)
-        anchor_stats = score([from_unit(anchor_u)], holdout_cells, args.steps,
+        anchor_stats = score([from_unit(anchor_u)], holdout_cells, cfg.steps,
                              metrics=True)[0]
         best_holdout = selection_score(anchor_stats, sel_key)
         best_vec = from_unit(anchor_u)
@@ -249,20 +228,20 @@ def main():
         print(f"anchor  holdout {anchor_stats['mean_bank']:>11,.0f}  "
               f"selection {best_holdout:>11,.0f}")
 
-        radius = args.radius
-        for it in range(args.iterations):
-            Q = random_subspace(len(NAMES), args.dim, rng)
-            zs = design_points(args.dim, radius)
-            zs += [np.array([rng.gauss(0, radius / 2) for _ in range(args.dim)])
-                   for _ in range(args.extra_points)]
+        radius = cfg.radius
+        for it in range(cfg.iterations):
+            Q = random_subspace(len(NAMES), cfg.dim, rng)
+            zs = design_points(cfg.dim, radius)
+            zs += [np.array([rng.gauss(0, radius / 2) for _ in range(cfg.dim)])
+                   for _ in range(cfg.extra_points)]
             us = [np.clip(anchor_u + Q @ z, 0.0, 1.0) for z in zs]
             population = [from_unit(u) for u in us]
 
             # Same rotation as search.cem (issue #68).
-            train_seeds = [(it * args.seeds + i) % args.train_pool
-                           for i in range(args.seeds)]
+            train_seeds = [(it * cfg.seeds + i) % cfg.train_pool
+                           for i in range(cfg.seeds)]
             train_cells = build_cells(train_opps, train_labels, train_seeds)
-            stats = score(population, train_cells, args.steps)
+            stats = score(population, train_cells, cfg.steps)
             fitness = normalised_fitness([s[key] for s in stats])
 
             _, g, H = fit_quadratic(zs, fitness)
@@ -270,7 +249,7 @@ def main():
             cand_u = np.clip(anchor_u + Q @ z_star, 0.0, 1.0)
             cand_vec = from_unit(cand_u)
 
-            cand_stats = score([cand_vec], holdout_cells, args.steps,
+            cand_stats = score([cand_vec], holdout_cells, cfg.steps,
                                metrics=True)[0]
             cand_sel = selection_score(cand_stats, sel_key)
             worst_label, worst_margin = worst_opponent(cand_stats)
@@ -311,11 +290,15 @@ def main():
                   f"worst {worst_label} {worst_margin:>+10,.0f}")
 
         finish_run(run, best_vec=best_vec, best_holdout=best_holdout,
-                   best_train=best_train, fitness=args.fitness, score_fn=score,
-                   clean_cells=clean_cells, steps=args.steps,
+                   best_train=best_train, fitness=cfg.fitness, score_fn=score,
+                   clean_cells=clean_cells, steps=cfg.steps,
                    heldout_labels=heldout_labels, run_dir=run_dir, group=group,
                    best_path=best_path)
 
 
 if __name__ == "__main__":
-    main()
+    # Deferred decoration: importing this module must never require hydra --
+    # only running it does.
+    import hydra
+    hydra.main(config_path=os.path.join(REPO, "configs"),
+               config_name="subspace", version_base=None)(main)()

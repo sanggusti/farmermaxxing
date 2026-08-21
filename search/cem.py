@@ -15,11 +15,14 @@ Scoring uses mean bank, not win-rate. Farms are independent and the market
 coupling is weak, so bank is nearly deterministic given a seed -- far less noisy
 than a win/loss bit, which means many fewer episodes per candidate.
 
-    python -m search.cem --generations 8 --population 24 --seeds 4        # local
-    python -m search.cem --generations 8 --population 48 --seeds 6 --modal
+Configuration composes from configs/cem.yaml (issue #98); overrides use
+Hydra's key=value grammar and experiment files live in configs/experiment/:
+
+    python -m search.cem generations=8 population=24 seeds=4        # local
+    python -m search.cem backend=modal generations=8 population=48 seeds=6
+    python -m search.cem backend=kaggle +experiment=smoke
 """
 
-import argparse
 import contextlib
 import json
 import os
@@ -358,98 +361,35 @@ def finish_run(run, *, best_vec, best_holdout, best_train, fitness, score_fn,
     return clean
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--generations", type=int, default=8)
-    ap.add_argument("--population", type=int, default=24)
-    ap.add_argument("--elite-frac", type=float, default=0.25)
-    ap.add_argument("--seeds", type=int, default=4,
-                    help="train seeds per gen (the MEAN per gen when --ramp "
-                         "is not 1: the total budget is generations * seeds "
-                         "either way)")
-    ap.add_argument("--ramp", type=float, default=1.0,
-                    help="first->last ratio of a geometric train-seed ramp "
-                         "(Retrospective Approximation, issue #72). 1.0 keeps "
-                         "the constant allocation; 8.0 starts at ~a third of "
-                         "--seeds and finishes at ~2.5x it, same total budget "
-                         "to the episode")
-    ap.add_argument("--train-pool", type=int, default=TRAIN_POOL,
-                    help="training seeds rotate from [0, pool) each generation. "
-                         "Must be < HOLDOUT_OFFSET (%(default)s)")
-    ap.add_argument("--holdout-seeds", type=int, default=6,
-                    help="disjoint seeds used to select the champion")
-    ap.add_argument("--clean-seeds", type=int, default=8,
-                    help="seeds touched only once, for an unbiased final number")
-    ap.add_argument("--steps", type=int, default=720)
-    ap.add_argument("--opponent", default="starter",
-                    help="single training opponent (legacy; prefer --opponents)")
-    ap.add_argument("--opponents", default=None,
-                    help="pool spec for TRAINING, e.g. 'starter,v3-fixed,"
-                         "v4-champion' or 'all'. Overrides --opponent. "
-                         "Ranking standardises each cell across the population, "
-                         "so a strong opponent is not drowned out by a weak one "
-                         "producing bigger banks.")
-    ap.add_argument("--fitness", choices=("bank", "margin"), default="bank",
-                    help="What the population is RANKED on. `bank` is what "
-                         "every search so far used. `margin` is my bank minus "
-                         "the opponent's: both players trade into one market, "
-                         "so a shared shock cancels, and its sign is the win "
-                         "the ladder scores. Selection and reporting stay on "
-                         "mean bank either way, so runs remain comparable.")
-    ap.add_argument("--reference", default=None,
-                    help="pool spec used for SELECTION and reporting. Held "
-                         "fixed so holdout scores stay comparable across "
-                         "generations and across runs. Defaults to --opponents.")
-    ap.add_argument("--holdout-opponents", type=int, default=0,
-                    help="withhold this many opponents from TRAINING while "
-                         "keeping them in the reference pool. Seed splits do "
-                         "not catch opponent memorisation: a run trained on 4 "
-                         "of 6 band tapes scored +10,188 (3.96 sigma) on those "
-                         "4 and -8,940 (-1.89 sigma) on the 2 held out, and "
-                         "every instrument reported it as the day's best "
-                         "candidate.")
-    ap.add_argument("--modal", action="store_true", help="fan out on Modal")
-    ap.add_argument("--kaggle", action="store_true",
-                    help="run on Kaggle notebook (free, ~40 min)")
-    ap.add_argument("--rng-seed", type=int, default=0)
-    ap.add_argument("--group", default=None)
-    ap.add_argument("--no-wandb", action="store_true")
-    ap.add_argument("--init-params", default=None,
-                    help="warm-start from this params.json instead of defaults")
-    ap.add_argument("--init-spread", type=float, default=None,
-                    help="initial std as a fraction of each range "
-                         "(default 0.25 cold, 0.10 warm)")
-    args = ap.parse_args()
+def main(cfg):
+    """Run the search described by `cfg` (composed from configs/cem.yaml)."""
+    from omegaconf import OmegaConf   # driver-side only, like hydra below
 
-    if args.kaggle:
-        # kaggle_nb rebuilds its config dict from args explicitly, so a flag
-        # it does not know about would be dropped WITHOUT ERROR -- a run
-        # asking for a ramp would silently get the constant allocation, which
-        # is exactly the shape of bug rule 7 exists for. Refuse instead.
-        if args.ramp != 1.0:
-            ap.error("--ramp is not forwarded to the Kaggle backend yet; "
-                     "run with --modal or locally, or teach "
-                     "search/kaggle_nb.py to forward it first")
+    if cfg.backend == "kaggle":
+        # The COMPOSED config is handed over whole; search/kernel_config.py
+        # makes the kernel refuse any key it does not know, which replaced
+        # the old per-flag forwarding guard (--ramp was refused here once,
+        # because a hand-copied dict dropped unknown flags WITHOUT ERROR).
         from search.kaggle_nb import run_cem_on_kaggle
-        run_cem_on_kaggle(args)
+        run_cem_on_kaggle(cfg)
         return
 
-    if args.no_wandb:
+    if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
 
-    if args.train_pool >= HOLDOUT_OFFSET:
-        ap.error(f"--train-pool {args.train_pool} overlaps with holdout seeds "
-                 f"(HOLDOUT_OFFSET={HOLDOUT_OFFSET})")
+    if cfg.train_pool >= HOLDOUT_OFFSET:
+        raise SystemExit(f"error: train_pool {cfg.train_pool} overlaps with "
+                         f"holdout seeds (HOLDOUT_OFFSET={HOLDOUT_OFFSET})")
     # The ramp reshapes WHEN episodes are spent, never how many: the schedule
     # sums to generations * seeds exactly. Only train cells ramp -- holdout
     # and clean cells keep their fixed sizes, because selection precision is
     # bought by the holdout set and the ramp's job is late-generation RANKING
     # precision.
-    seeds_schedule = ramp_schedule(args.generations, args.seeds, args.ramp)
-    if args.train_pool < max(seeds_schedule):
-        ap.error(f"--train-pool {args.train_pool} < the largest generation's "
-                 f"seed count {max(seeds_schedule)}: that generation would "
-                 f"reuse seeds within itself")
+    seeds_schedule = ramp_schedule(cfg.generations, cfg.seeds, cfg.ramp)
+    if cfg.train_pool < max(seeds_schedule):
+        raise SystemExit(f"error: train_pool {cfg.train_pool} < the largest "
+                         f"generation's seed count {max(seeds_schedule)}: that "
+                         f"generation would reuse seeds within itself")
     # Cumulative offsets: consecutive generations take consecutive seed
     # blocks, so at --ramp 1 this is bit-for-bit the legacy
     # (gen * seeds + i) % pool rotation and old runs stay reproducible.
@@ -457,16 +397,16 @@ def main():
     for n in seeds_schedule:
         seed_starts.append(seed_starts[-1] + n)
 
-    rng = random.Random(args.rng_seed)
+    rng = random.Random(cfg.rng_seed)
     # Train seeds rotate per generation; built inside the loop.
-    holdout_seeds = [HOLDOUT_OFFSET + i for i in range(args.holdout_seeds)]
-    clean_seeds = [CLEAN_OFFSET + i for i in range(args.clean_seeds)]
+    holdout_seeds = [HOLDOUT_OFFSET + i for i in range(cfg.holdout_seeds)]
+    clean_seeds = [CLEAN_OFFSET + i for i in range(cfg.clean_seeds)]
 
     # Training pool may vary; the reference pool must not. Selection and the
     # final clean number are both measured on the reference, so that a holdout
     # score from generation 2 and one from generation 29 mean the same thing.
-    train_pool_spec = args.opponents or args.opponent
-    ref_pool_spec = args.reference or train_pool_spec
+    train_pool_spec = cfg.opponents
+    ref_pool_spec = cfg.reference or train_pool_spec
     train_opps, train_labels = resolve_pool(train_pool_spec)
     ref_opps, ref_labels = resolve_pool(ref_pool_spec)
 
@@ -475,12 +415,13 @@ def main():
     # they just never shape the parameters. That asymmetry is the whole point:
     # `vs/<label>/*` then splits cleanly into memorised and generalised.
     heldout_labels = []
-    if args.holdout_opponents > 0:
-        if args.holdout_opponents >= len(train_labels):
-            ap.error(f"--holdout-opponents {args.holdout_opponents} leaves "
-                     f"nothing to train on ({len(train_labels)} in the pool)")
+    if cfg.holdout_opponents > 0:
+        if cfg.holdout_opponents >= len(train_labels):
+            raise SystemExit(f"error: holdout_opponents "
+                             f"{cfg.holdout_opponents} leaves nothing to "
+                             f"train on ({len(train_labels)} in the pool)")
         keep = list(range(len(train_labels)))
-        drop = sorted(rng.sample(keep, args.holdout_opponents))
+        drop = sorted(rng.sample(keep, cfg.holdout_opponents))
         heldout_labels = [train_labels[i] for i in drop]
         train_opps = [o for i, o in enumerate(train_opps) if i not in drop]
         train_labels = [l for i, l in enumerate(train_labels) if i not in drop]
@@ -490,21 +431,22 @@ def main():
     # train_cells built per generation inside the loop (seed rotation).
     holdout_cells = build_cells(ref_opps, ref_labels, holdout_seeds)
     clean_cells = build_cells(ref_opps, ref_labels, clean_seeds)
-    if args.init_params:
-        base = Params.from_json(args.init_params)
-        spread = args.init_spread if args.init_spread is not None else 0.10
+    if cfg.init_params:
+        base = Params.from_json(cfg.init_params)
+        spread = cfg.init_spread if cfg.init_spread is not None else 0.10
     else:
         base = Params()
-        spread = args.init_spread if args.init_spread is not None else 0.25
+        spread = cfg.init_spread if cfg.init_spread is not None else 0.25
     mean, std = initial_distribution(base, spread)
-    score = score_modal if args.modal else score_local
+    on_modal = cfg.backend == "modal"
+    score = score_modal if on_modal else score_local
 
     # Modal needs its app held open across the whole search; locally this is a
     # no-op so the loop below is identical either way.
-    backend_session = modal_session() if args.modal else contextlib.nullcontext()
-    n_elite = max(2, int(args.population * args.elite_frac))
+    backend_session = modal_session() if on_modal else contextlib.nullcontext()
+    n_elite = max(2, int(cfg.population * cfg.elite_frac))
 
-    group = args.group or f"cem-g{args.generations}-p{args.population}"
+    group = cfg.group or f"cem-g{cfg.generations}-p{cfg.population}"
     run_dir = os.path.join(RUNS_DIR, group)
     os.makedirs(run_dir, exist_ok=True)
     best_path = os.path.join(run_dir, "best_params.json")
@@ -514,28 +456,24 @@ def main():
     best_holdout, best_vec, best_train = float("-inf"), None, None
     best_worst = None
 
+    # The FULL composed config, so a new yaml key reaches wandb without anyone
+    # remembering to forward it, plus the derived values worth charting.
     with backend_session, wandb_setup.start("cem", group=group, tags=["cem"], config={
-        "generations": args.generations, "population": args.population,
-        "elite_frac": args.elite_frac, "train_seeds": args.seeds,
-        "train_pool": args.train_pool,
-        "holdout_seeds": args.holdout_seeds,
-        "opponent": args.opponent,
-        "fitness": args.fitness,
+        **OmegaConf.to_container(cfg, resolve=True),
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
-        "train_cells_per_gen": len(train_opps) * args.seeds * 2,
-        "ramp": args.ramp, "seeds_schedule": seeds_schedule,
+        "train_cells_per_gen": len(train_opps) * cfg.seeds * 2,
+        "seeds_schedule": seeds_schedule,
         "train_episodes_total":
-            args.population * len(train_opps) * 2 * sum(seeds_schedule),
+            cfg.population * len(train_opps) * 2 * sum(seeds_schedule),
         "holdout_cells": len(holdout_cells),
-        "backend": "modal" if args.modal else "local",
-        "init_params": args.init_params or "defaults", "init_spread": spread,
+        "init_params": cfg.init_params or "defaults", "init_spread": spread,
     }) as run:
 
-        for gen in range(args.generations):
+        for gen in range(cfg.generations):
             # Generation 0 always includes the current defaults, so a search can
             # never return something worse than what we started with.
-            population = [sample(mean, std, rng) for _ in range(args.population)]
+            population = [sample(mean, std, rng) for _ in range(cfg.population)]
             if gen == 0:
                 population[0] = flatten(base)
 
@@ -545,17 +483,17 @@ def main():
             # comes from the ramp schedule (issue #72); the cumulative start
             # keeps blocks consecutive, so at --ramp 1 this is the legacy
             # (gen * seeds + i) % pool.
-            train_seeds = [(seed_starts[gen] + i) % args.train_pool
+            train_seeds = [(seed_starts[gen] + i) % cfg.train_pool
                            for i in range(seeds_schedule[gen])]
             train_cells = build_cells(train_opps, train_labels, train_seeds)
 
-            stats = score(population, train_cells, args.steps)
+            stats = score(population, train_cells, cfg.steps)
             # Rank on per-cell z-scores, not raw mean bank. With a mixed pool a
             # raw mean is dominated by whichever opponent pays the most coins:
             # `starter` at ~140k outvotes `v3-fixed` at ~46k about three to one,
             # so the mixture would quietly collapse back into training against
             # `starter` -- the exact bias this change exists to remove.
-            key = "margins" if args.fitness == "margin" else "banks"
+            key = "margins" if cfg.fitness == "margin" else "banks"
             fitness = normalised_fitness([s[key] for s in stats])
             ranked = sorted(zip(fitness, stats, population), key=lambda t: -t[0])
             elites = [vec for _, _, vec in ranked[:n_elite]]
@@ -565,7 +503,7 @@ def main():
             # Census only on the elite re-scoring: it is a fraction of the
             # episodes and these are the numbers that get reported, so the
             # sampling cost never lands on the hot path.
-            hold_stats = score(elites, holdout_cells, args.steps, metrics=True)
+            hold_stats = score(elites, holdout_cells, cfg.steps, metrics=True)
             # Selection uses the SAME quantity the population was ranked on,
             # in raw units over the FIXED reference pool. Raw rather than
             # z-scored because z-scores are relative to one population and the
@@ -577,7 +515,7 @@ def main():
             # was chosen, and the result won every matchup while its mean bank
             # stayed flat. Mean margin over a fixed pool is just as comparable
             # across generations as mean bank, so there is no reason to mix.
-            sel_key = "mean_margin" if args.fitness == "margin" else "mean_bank"
+            sel_key = "mean_margin" if cfg.fitness == "margin" else "mean_bank"
             hold_ranked = sorted(zip(hold_stats, elites),
                                  key=lambda sp: -selection_score(sp[0], sel_key))
             champion_stats, champion_vec = hold_ranked[0]
@@ -621,9 +559,9 @@ def main():
                 # exactly population * opps * 2 * generations * seeds at the
                 # end, or the "budget-neutral" claim is false.
                 "train_seeds_this_gen": seeds_schedule[gen],
-                "episodes_this_gen": args.population * len(train_cells),
+                "episodes_this_gen": cfg.population * len(train_cells),
                 "cum_train_episodes":
-                    args.population * len(train_opps) * 2 * seed_starts[gen + 1],
+                    cfg.population * len(train_opps) * 2 * seed_starts[gen + 1],
             }
             # Land and breadth census for the generation champion. Diagnostics,
             # never fitness -- optimising a proxy for "using the farm" instead
@@ -647,11 +585,15 @@ def main():
                   + ("  [rejected: worst regressed]" if regressed else ""))
 
         finish_run(run, best_vec=best_vec, best_holdout=best_holdout,
-                   best_train=best_train, fitness=args.fitness, score_fn=score,
-                   clean_cells=clean_cells, steps=args.steps,
+                   best_train=best_train, fitness=cfg.fitness, score_fn=score,
+                   clean_cells=clean_cells, steps=cfg.steps,
                    heldout_labels=heldout_labels, run_dir=run_dir, group=group,
                    best_path=best_path)
 
 
 if __name__ == "__main__":
-    main()
+    # Deferred decoration: importing this module (the Kaggle kernel and the
+    # Modal image both do) must never require hydra -- only running it does.
+    import hydra
+    hydra.main(config_path=os.path.join(REPO, "configs"),
+               config_name="cem", version_base=None)(main)()

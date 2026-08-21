@@ -1,9 +1,11 @@
 """Promotion gate: decide whether a candidate is genuinely better.
 
-    python -m sim.gate --candidate agent/params.json --champion sim/opponents/v1.json
+    python -m sim.gate candidate=agent/params.json champion=sim/opponents/v1.json
 
-Runs on holdout seeds only, against the full frozen pool, from both seats, and
-exits non-zero unless every check passes. `make submit` sits behind it.
+Configuration composes from configs/gate.yaml (issue #98); `make gate` wraps
+the invocation. Runs on holdout seeds only, against the full frozen pool, from
+both seats, and exits non-zero unless every check passes. `make submit` sits
+behind it.
 
 The checks exist because of two specific ways a candidate reads as better
 without being better:
@@ -16,7 +18,7 @@ without being better:
     coins, so a 500-coin improvement is not evidence.
 """
 
-import argparse
+import os
 import statistics
 import sys
 
@@ -167,63 +169,45 @@ def run_gate(candidate, champion, pool_spec, n_seeds, steps,
             cand_rows, champ_rows)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--candidate", default="agent/params.json")
-    ap.add_argument("--champion", default=None,
-                    help="params.json to beat; defaults to the snapshot named "
-                         "in the CHAMPION file at the repo root")
-    ap.add_argument("--opponents", default="top",
-                    help="pool spec (top|band|real|frozen|all|names). Defaults "
-                         "to `top`, the prize band -- see sim.opponents")
-    ap.add_argument("--trained-on", default=None,
-                    help="comma-separated opponent labels the candidate was "
-                         "SEARCHED against. The rest of the pool becomes a "
-                         "held-out subset and gets its own check.")
-    ap.add_argument("--seeds", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=720)
-    ap.add_argument("--margin-sigmas", type=float, default=1.0)
-    ap.add_argument("--floor-tolerance", type=float, default=0.10)
-    ap.add_argument("--on-selection-seeds", action="store_true",
-                    help="judge on the seeds used to select (biased; for "
-                         "measuring that bias, not for promotion decisions)")
-    ap.add_argument("--wandb", action="store_true")
-    args = ap.parse_args()
+def main(cfg):
+    """Run the gate described by `cfg` (composed from configs/gate.yaml).
 
-    candidate = Params.from_json(args.candidate)
+    Exits via sys.exit rather than returning the code: hydra.main discards
+    return values, and `make submit` depends on this 0/1.
+    """
+    candidate = Params.from_json(cfg.candidate)
     # NOT `Params()`. Falling back to dataclass defaults meant `make gate` with
     # no CHAMPION= compared a tuned candidate against the hand-written baseline
     # that banks 24,895, which every candidate passes trivially. The gate then
     # printed GATE PASSED and meant nothing by it.
-    if args.champion:
-        champion = Params.from_json(args.champion)
-        champion_label = args.champion
+    if cfg.champion:
+        champion = Params.from_json(cfg.champion)
+        champion_label = cfg.champion
     else:
         champion = champion_params()          # raises if CHAMPION is unusable
         champion_label = f"CHAMPION -> {champion_name()}"
 
-    if not args.wandb:
-        import os
+    if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
 
-    offset = HOLDOUT_OFFSET if args.on_selection_seeds else CLEAN_OFFSET
-    trained_on = ([s.strip() for s in args.trained_on.split(",") if s.strip()]
-                  if args.trained_on else None)
+    offset = HOLDOUT_OFFSET if cfg.on_selection_seeds else CLEAN_OFFSET
+    trained_on = ([s.strip() for s in cfg.trained_on.split(",") if s.strip()]
+                  if cfg.trained_on else None)
     checks, cand, champ, by_opp, delta, se, cand_rows, champ_rows = run_gate(
-        candidate, champion, args.opponents, args.seeds, args.steps,
-        args.margin_sigmas, args.floor_tolerance, offset=offset,
+        candidate, champion, cfg.opponents, cfg.seeds, cfg.steps,
+        cfg.margin_sigmas, cfg.floor_tolerance, offset=offset,
         trained_on=trained_on)
     passed = all(ok for _, ok, _ in checks)
 
-    print(f"candidate : {args.candidate}")
+    print(f"candidate : {cfg.candidate}")
     print(f"champion  : {champion_label}")
-    print(f"pool      : {args.opponents} -> {sorted(by_opp)}")
+    print(f"pool      : {cfg.opponents} -> {sorted(by_opp)}")
     if trained_on:
         held = sorted(set(by_opp) - set(trained_on))
         print(f"trained on: {sorted(trained_on)}")
         print(f"held out  : {held or 'NOTHING -- the pool is entirely trained-on'}")
-    kind = "selection (BIASED)" if args.on_selection_seeds else "clean"
-    print(f"seeds     : {kind} {offset}..{offset + args.seeds - 1}, both seats")
+    kind = "selection (BIASED)" if cfg.on_selection_seeds else "clean"
+    print(f"seeds     : {kind} {offset}..{offset + cfg.seeds - 1}, both seats")
     print()
     print(f"{'':<12} {'mean':>12} {'worst':>12} {'win':>8}")
     print(f"{'candidate':<12} {cand['mean_bank']:>12,.0f} {cand['min_bank']:>12,.0f} {cand['win_rate']:>7.1%}")
@@ -287,7 +271,7 @@ def main():
     print()
     print("GATE PASSED" if passed else "GATE FAILED")
 
-    if args.wandb:
+    if cfg.wandb:
         from dataclasses import asdict
         with wandb_setup.start("gate", config=asdict(candidate), tags=["gate"]) as run:
             run.summary.update({
@@ -299,8 +283,13 @@ def main():
                 "champion_mean_bank": champ["mean_bank"],
             })
 
-    return 0 if passed else 1
+    sys.exit(0 if passed else 1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Deferred decoration: importing this module (tests import decide/
+    # run_gate directly) must never require hydra -- only running does.
+    import hydra
+    _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    hydra.main(config_path=os.path.join(_REPO, "configs"),
+               config_name="gate", version_base=None)(main)()

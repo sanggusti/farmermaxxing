@@ -1,0 +1,38 @@
+# Keys whose defaults are identical across the three search drivers
+# (cem, cmaes, subspace). Per-driver keys and any default that DIFFERS
+# between drivers (seeds, rng_seed) live in the driver's primary config.
+#
+# This file replaced the shared argparse flag family (issue #98). The old
+# arrangement kept three copies of these defaults that could drift, and the
+# Kaggle backend hand-copied them into a dict where an untaught flag was
+# dropped WITHOUT ERROR -- the composed config now flows to every backend
+# whole (see search/kernel_config.py for the enforcement).
+
+# Training seeds rotate from [0, train_pool) each generation.
+# Must stay < search.cem.HOLDOUT_OFFSET (10,000): the seed-range offsets are
+# deliberately NOT configurable, because two runs with different offsets stop
+# being comparable and sim/gate.py pins the same constants.
+train_pool: 1000
+holdout_seeds: 6      # disjoint seeds used to select the champion
+clean_seeds: 8        # touched exactly once, for the unbiased final number
+steps: 720
+
+# Pool spec for TRAINING, e.g. "starter", "top", "tape:meta-a,tape:meta-b".
+# Subsumes the old --opponent/--opponents pair: one key, one meaning.
+opponents: starter
+# Pool spec for SELECTION and reporting; held fixed so holdout scores stay
+# comparable across generations and runs. null -> same as `opponents`.
+reference: null
+# Withhold N opponents from training while keeping them in the reference
+# pool. Seed splits do not catch opponent memorisation: a run trained on 4
+# of 6 band tapes scored +10,188 (3.96 sigma) on those 4 and -8,940 on the
+# 2 held out, and every instrument called it the day's best candidate.
+holdout_opponents: 0
+
+fitness: bank         # bank | margin -- what the population is RANKED on
+
+group: null           # run dir under runs/; null -> driver-derived name
+wandb: true           # replaces --no-wandb
+init_params: null     # warm-start from this params.json instead of defaults
+init_spread: null     # std as a fraction of each range; null -> 0.25 cold, 0.10 warm
+backend: local        # local | modal | kaggle (kaggle: cem only)

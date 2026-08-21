@@ -1,0 +1,14 @@
+# @package _global_
+# Smallest run that exercises the whole Kaggle path end to end:
+# compose -> package -> push -> poll -> download -> offline-wandb sync.
+# 2 gens x pop 8 x 2 seeds against the top-band tapes, holdout/clean shrunk
+# to match -- this measures the PLUMBING, not the agent. Run with:
+#   make search-kaggle EXP=smoke
+backend: kaggle
+generations: 2
+population: 8
+seeds: 2
+holdout_seeds: 2
+clean_seeds: 2
+opponents: top
+group: cem-smoke
