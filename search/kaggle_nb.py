@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,10 +31,6 @@ RUNS_DIR = os.path.join(REPO, "runs")
 STAGING_DIR = os.path.join(REPO, ".kaggle-staging")
 
 KERNEL_SLUG_SUFFIX = "farmermaxxing-cem-search"
-# TPU runs get their own kernel slot: a push to an ACTIVE slug 409s and then
-# overwrites it on retry, so sharing one slug would let a TPU experiment
-# clobber a running CPU-tier search (and vice versa).
-KERNEL_SLUG_SUFFIX_TPU = "farmermaxxing-cem-search-tpu"
 
 
 def _kaggle_username():
@@ -50,6 +47,28 @@ def _kaggle_username():
 
 def _kernel_slug(username):
     return f"{username}/{KERNEL_SLUG_SUFFIX}"
+
+
+def _run_slug(username, group):
+    """A FRESH kernel slot for every run, never a new version of an old one.
+
+    Pushing new code to an existing slug creates a new VERSION of that
+    kernel, and Kaggle surfaces the previous version's logs and output until
+    the new version completes -- observed 2026-08-21: a run reusing the slug
+    showed only the prior run's logs, which is exactly the shape of bug rule
+    7 exists for (stale results that look like results). A unique slug per
+    run gives every run its own page and its own output, and it removes the
+    409-on-active-slug conflict outright: two runs can never share a slot,
+    whatever their tiers or timing.
+
+    The timestamp disambiguates same-group re-runs; the group keeps the slot
+    findable next to runs/<group>/. Kaggle caps slugs at 50 chars, so the
+    group part is truncated to fit.
+    """
+    stamp = time.strftime("%m%d-%H%M")
+    base = re.sub(r"[^a-z0-9-]+", "-", group.lower()).strip("-")
+    base = base[:50 - len("farmermaxxing--") - len(stamp)].rstrip("-")
+    return f"{username}/farmermaxxing-{base}-{stamp}"
 
 
 def _wandb_api_key():
@@ -436,8 +455,7 @@ def run_cem_on_kaggle(cfg):
     # (search/kaggle_tpu_probe.py; measured 96 cores, 67.5 eps/s, ~9 min
     # queue for a slot, ~20h/week quota).
     on_tpu = config["machine"] == "tpu"
-    slug_suffix = KERNEL_SLUG_SUFFIX_TPU if on_tpu else KERNEL_SLUG_SUFFIX
-    slug = f"{username}/{slug_suffix}"
+    slug = _run_slug(username, group)
     extra_meta = {"enable_tpu": "true"} if on_tpu else None
 
     print(f"=== Kaggle CEM: {group} ===")

@@ -910,9 +910,13 @@ zero across a run means the operator never beat the Gaussian's own offspring.
 deliberately deferred). The kernel now sizes its fork pool from
 `sched_getaffinity` — 4 on the CPU tier as before, 96 on the TPU VM (probe:
 67.5 eps/s, 98x single-process, ~24x the CPU kernel) — and requests the TPU
-via the `enable_tpu` kernel metadata the probe validated, under its own slug
-(`farmermaxxing-cem-search-tpu`) so a TPU experiment can never 409-clobber a
-running CPU search. Rule 7 guard in the kernel's first minute: `machine=tpu`
+via the `enable_tpu` kernel metadata the probe validated. Every run now gets
+its OWN kernel slug (`farmermaxxing-<group>-<mmdd-hhmm>`): pushing new code
+to an existing slug creates a new VERSION of that kernel, and Kaggle
+surfaces the previous version's logs and output until the new one completes
+— observed same day, a re-push showed only the prior run's logs (rule 7:
+stale results that look like results). Per-run slugs also delete the
+409-on-active-slug conflict outright, whatever the tiers or timing. Rule 7 guard in the kernel's first minute: `machine=tpu`
 with fewer than 16 granted cores is a SystemExit, because a silent landing
 on the CPU tier would complete ~24x slower with plausible numbers. The
 kernel also writes `clean_scores.json` in `finish_run`'s exact schema now,
