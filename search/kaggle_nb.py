@@ -37,7 +37,7 @@ KERNEL_DIR = os.path.join(os.path.dirname(__file__), "kaggle_notebook")
 # These are fixed after one-time setup. The username is read from the Kaggle
 # CLI config; the slugs follow Kaggle's naming convention.
 DATASET_SLUG_SUFFIX = "farmermaxxing-cem-code"
-KERNEL_SLUG_SUFFIX = "farmermaxxing-cem"
+KERNEL_SLUG_SUFFIX = "farmermaxxing-cem-search"
 
 
 def _kaggle_username():
@@ -212,10 +212,25 @@ def push_kernel(username):
     with open(os.path.join(kernel_staging, "kernel-metadata.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
-    subprocess.run(
+    result = subprocess.run(
         ["kaggle", "kernels", "push", "-p", kernel_staging],
-        check=True,
+        capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        # 409 means a previous version is still running/error; retry after wait
+        if "409" in stderr or "Conflict" in stderr:
+            print("previous kernel version still active, waiting 30s and retrying...")
+            time.sleep(30)
+            subprocess.run(
+                ["kaggle", "kernels", "push", "-p", kernel_staging],
+                check=True,
+            )
+        else:
+            print(f"kernel push failed: {stderr}")
+            print(result.stdout)
+            raise subprocess.CalledProcessError(result.returncode,
+                                                result.args, result.stdout, stderr)
     print(f"kernel pushed: {_kernel_slug(username)}")
 
 
