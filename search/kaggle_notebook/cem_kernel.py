@@ -78,6 +78,7 @@ with open(os.path.join(DATASET, "cem_config.json")) as f:
 # 4. Imports (after sys.path is set)
 # ---------------------------------------------------------------------------
 from params import Params, SEARCH_SPACE, flatten, unflatten  # noqa: E402
+from obs import wandb_setup                                   # noqa: E402
 from sim.opponents import resolve_pool                        # noqa: E402
 from sim.arena import CENSUS_KEYS as ARENA_CENSUS_KEYS        # noqa: E402
 from search.league import (build_cells, normalised_fitness,   # noqa: E402
@@ -201,6 +202,21 @@ best_worst = None
 gen_log = open(os.path.join(OUTPUT, "generations.jsonl"), "w")
 t0 = time.time()
 
+# W&B live tracking — streams per-generation metrics in real time.
+# When WANDB_MODE=disabled (no API key), wandb_setup.start() returns a
+# _NullRun whose .log() is a no-op, so the code below never branches.
+wandb_run = wandb_setup.start("cem", group=group, tags=["cem", "kaggle"], config={
+    "generations": generations, "population": population,
+    "elite_frac": elite_frac, "train_seeds": seeds,
+    "train_pool": train_pool_size,
+    "holdout_seeds": holdout_seeds_n,
+    "fitness": fitness_key,
+    "train_opponents": train_labels, "reference_opponents": ref_labels,
+    "heldout_opponents": heldout_labels,
+    "backend": "kaggle",
+    "init_spread": spread,
+})
+
 for gen in range(generations):
     gt = time.time()
     population_vecs = [sample(mean, std, rng) for _ in range(population)]
@@ -265,6 +281,7 @@ for gen in range(generations):
     row["worst_opponent_margin"] = worst_margin
     row["wall_seconds"] = time.time() - gt
 
+    wandb_run.log(row)
     gen_log.write(json.dumps(row) + "\n")
     gen_log.flush()
     print(f"gen {gen:>2}  train {train_best:>11,.0f}  "
@@ -312,6 +329,24 @@ with open(os.path.join(OUTPUT, "results.json"), "w") as f:
     json.dump(results, f, indent=2)
 
 gen_log.close()
+
+# W&B summary and artifact
+wandb_run.summary["best_holdout_bank"] = results.get("best_holdout")
+wandb_run.summary["best_train_bank"] = results.get("best_train")
+if results.get("clean_bank") is not None:
+    wandb_run.summary["clean_bank"] = results["clean_bank"]
+    wandb_run.summary["clean_min_bank"] = results.get("clean_min_bank")
+    wandb_run.summary["clean_selection_score"] = results.get("clean_selection_score")
+    wandb_run.summary["selection_bias"] = results.get("selection_bias")
+    for label, b in (results.get("clean_by_opponent") or {}).items():
+        wandb_run.summary[f"clean_vs/{label}/mean_bank"] = b["mean_bank"]
+        wandb_run.summary[f"clean_vs/{label}/win_rate"] = b["win_rate"]
+best_path = os.path.join(OUTPUT, "best_params.json")
+if os.path.exists(best_path):
+    wandb_setup.log_params_artifact(
+        wandb_run, best_path,
+        metadata={"holdout_mean_bank": results.get("best_holdout")})
+wandb_run.finish()
 
 # ---------------------------------------------------------------------------
 # 9. Summary

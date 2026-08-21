@@ -47,6 +47,23 @@ def _kernel_slug(username):
     return f"{username}/{KERNEL_SLUG_SUFFIX}"
 
 
+def _wandb_api_key():
+    """Read WANDB_API_KEY from .env or environment."""
+    # Check environment first
+    key = os.environ.get("WANDB_API_KEY")
+    if key:
+        return key
+    # Then .env
+    env_path = os.path.join(REPO, ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("WANDB_API_KEY=") and not line.startswith("#"):
+                    return line.split("=", 1)[1].strip()
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Packaging — build a self-extracting kernel script
 # ---------------------------------------------------------------------------
@@ -90,17 +107,35 @@ def _build_tarball_bytes(config_dict):
     return buf.getvalue()
 
 
-def _generate_kernel_script(tarball_b64):
+def _generate_kernel_script(tarball_b64, wandb_api_key=None):
     """Generate a self-extracting kernel script.
 
     The script embeds the tarball as base64, extracts it to /tmp/fm,
-    then runs the CEM loop.
+    then runs the CEM loop. If wandb_api_key is provided, W&B tracking
+    is enabled for live monitoring.
     """
     # Read the CEM kernel template
     template_path = os.path.join(
         os.path.dirname(__file__), "kaggle_notebook", "cem_kernel.py")
     with open(template_path) as f:
         template = f.read()
+
+    # W&B setup: install wandb and set the key, or disable entirely
+    if wandb_api_key:
+        wandb_block = f'''
+# Install wandb for live tracking
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install",
+    "wandb", "-q", "--disable-pip-version-check",
+])
+os.environ["WANDB_API_KEY"] = "{wandb_api_key}"
+os.environ["WANDB_DISABLE_GIT"] = "true"
+os.environ["WANDB_SILENT"] = "true"
+'''
+    else:
+        wandb_block = '''
+os.environ["WANDB_MODE"] = "disabled"
+'''
 
     # Build the self-extracting preamble
     preamble = f'''#!/usr/bin/env python3
@@ -122,7 +157,7 @@ subprocess.check_call([
     sys.executable, "-m", "pip", "install",
     "kaggle-environments==1.32.4", "-q", "--disable-pip-version-check",
 ])
-
+{wandb_block}
 # Extract embedded code
 _PAYLOAD = """{tarball_b64}"""
 
@@ -130,7 +165,6 @@ CODE = "/tmp/fm"
 os.makedirs(CODE, exist_ok=True)
 tarfile.open(fileobj=io.BytesIO(base64.b64decode(_PAYLOAD)), mode="r:gz").extractall(CODE)
 sys.path[:0] = [CODE, os.path.join(CODE, "agent")]
-os.environ["WANDB_MODE"] = "disabled"
 
 print(f"code extracted to {{CODE}}")
 print(f"agent files: {{os.listdir(os.path.join(CODE, 'agent'))}}")
@@ -340,10 +374,15 @@ def run_cem_on_kaggle(args):
     print()
 
     # Step 1: Build the self-extracting kernel script
+    wandb_key = None if args.no_wandb else _wandb_api_key()
     print("building kernel script with embedded code...")
+    if wandb_key:
+        print("  W&B: live tracking enabled (key from .env)")
+    else:
+        print("  W&B: disabled" + (" (--no-wandb)" if args.no_wandb else " (no key found)"))
     tarball_bytes = _build_tarball_bytes(config)
     tarball_b64 = base64.b64encode(tarball_bytes).decode()
-    script = _generate_kernel_script(tarball_b64)
+    script = _generate_kernel_script(tarball_b64, wandb_api_key=wandb_key)
     print(f"  tarball: {len(tarball_bytes):,} bytes")
     print(f"  script:  {len(script):,} chars")
 
@@ -378,12 +417,16 @@ def run_cem_on_kaggle(args):
                 print(f"clean:   {results['clean_bank']:,.0f}")
             print(f"wall:    {results.get('wall_seconds', 0):.0f}s")
 
-    # Step 5: Log to W&B (unless --no-wandb)
-    if not args.no_wandb:
+    # Step 5: Log to W&B (unless live tracking was already enabled)
+    if not args.no_wandb and not wandb_key:
+        # No API key was embedded, so the kernel ran with WANDB_MODE=disabled.
+        # Replay the results into W&B from the local machine.
         results_path = os.path.join(run_dir, "results.json")
         if os.path.exists(results_path):
-            print("\nlogging to W&B...")
+            print("\nreplaying results to W&B (kernel had no API key)...")
             log_results_to_wandb(run_dir, group, config)
+    elif wandb_key:
+        print("\nW&B: results already streamed live from Kaggle")
 
 
 # ---------------------------------------------------------------------------
