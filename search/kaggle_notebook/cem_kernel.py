@@ -29,11 +29,16 @@ subprocess.check_call([
 ])
 
 # ---------------------------------------------------------------------------
-# 2. Extract code from the dataset
+# 2. Locate the code from the dataset
 # ---------------------------------------------------------------------------
+# Kaggle auto-extracts .tar.gz uploads into a subdirectory named after the
+# archive (minus the extension). So code.tar.gz becomes code/.
 DATASET = "/kaggle/input/farmermaxxing-cem-code"
-CODE = "/tmp/fm"
-tarfile.open(os.path.join(DATASET, "code.tar.gz")).extractall(CODE)
+CODE = os.path.join(DATASET, "code")
+if not os.path.isdir(CODE):
+    # Fallback: try extracting manually (in case Kaggle changes behaviour)
+    CODE = "/tmp/fm"
+    tarfile.open(os.path.join(DATASET, "code.tar.gz")).extractall(CODE)
 sys.path[:0] = [CODE, os.path.join(CODE, "agent")]
 os.environ["WANDB_MODE"] = "disabled"
 
