@@ -83,10 +83,60 @@ from sim.arena import CENSUS_KEYS as ARENA_CENSUS_KEYS        # noqa: E402
 from search.league import (build_cells, normalised_fitness,   # noqa: E402
                            worst_opponent)
 from search.cem import (                                      # noqa: E402
-    initial_distribution, sample, refit, score_local,
+    initial_distribution, sample, refit,
     selection_score, HOLDOUT_OFFSET, CLEAN_OFFSET,
     WORST_TOLERANCE, WORST_TOLERANCE_FLOOR,
 )
+from search.modal_app import summarise_cells                   # noqa: E402
+
+# ---------------------------------------------------------------------------
+# 4b. Parallel score_local for Kaggle (4 cores available)
+# ---------------------------------------------------------------------------
+import multiprocessing as mp
+
+def _run_one(args):
+    """Score one (candidate, cell) pair. Picklable for multiprocessing."""
+    vec, opp, seed, seat, steps, metrics = args
+    from params import unflatten as _unflatten
+    from sim.fastplay import fast_play
+    from sim.harness import make_agent
+    params = _unflatten(vec)
+    me = make_agent(params)
+    a, b = (me, opp) if seat == 0 else (opp, me)
+    r = fast_play(a, b, seed=seed, steps=steps, metrics=metrics)
+    row = {"bank": r["banks"][seat], "opp_bank": r["banks"][1 - seat],
+           "status": r["statuses"][seat]}
+    if "metrics" in r:
+        row.update(r["metrics"][seat])
+    return row
+
+# Kaggle provides 4 cores; use them all.
+_WORKERS = int(os.environ.get("FM_WORKERS", "4"))
+
+def score_local(vectors, cells, steps, metrics=False):
+    """Parallel version of search.cem.score_local for Kaggle's 4-core CPUs.
+
+    ~51k episodes at 1.3s each would take ~18h single-threaded, exceeding
+    Kaggle's 12h limit. With 4 workers: ~4.7h, safely within budget.
+    """
+    work = []
+    owner = []
+    for i, vec in enumerate(vectors):
+        for opp, _label, seed, seat in cells:
+            work.append((vec, opp, seed, seat, steps, metrics))
+            owner.append(i)
+
+    labels = [c[1] for c in cells]
+
+    # fork preserves the warm imports
+    ctx = mp.get_context("fork")
+    with ctx.Pool(_WORKERS) as pool:
+        flat = pool.map(_run_one, work)
+
+    results = [[] for _ in vectors]
+    for idx, r in zip(owner, flat):
+        results[idx].append(r)
+    return [summarise_cells(rows, labels) for rows in results]
 
 # ---------------------------------------------------------------------------
 # 5. Resolve configuration
