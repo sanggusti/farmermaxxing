@@ -164,9 +164,13 @@ def main(cfg):
     es = make_es(vec_to_x(flatten(base)), spread, popsize, cfg.rng_seed)
 
     # The FULL composed config plus the derived values (same shape as cem).
+    # selection_metric is a string, so it lives here and never in a row
+    # (see the canonical key schema in obs/wandb_setup.py).
     with backend_session, wandb_setup.start("cmaes", group=group,
-                                            tags=["cmaes"], config={
+                                            tags=["cmaes"],
+                                            step_metric="gen", config={
         **OmegaConf.to_container(cfg, resolve=True),
+        "selection_metric": sel_key,
         "popsize": popsize,
         "train_opponents": train_labels, "reference_opponents": ref_labels,
         "heldout_opponents": heldout_labels,
@@ -220,8 +224,7 @@ def main(cfg):
                 # full covariance bought nothing a diagonal did not have.
                 "sigma": float(es.sigma),
                 "axis_ratio": float(max(es.D) / min(es.D)),
-                "best_holdout_overall": best_holdout,
-                "selection_metric": sel_key,
+                "best_holdout_bank": best_holdout,
             }
 
             # Periodic selection, not per-generation: at popsize 16 and 2

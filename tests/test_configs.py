@@ -36,17 +36,34 @@ def test_misspelled_override_is_rejected():
             compose(config_name="cem", overrides=["generatoins=2"])
 
 
-def test_experiment_smoke_composes_on_cem():
+@pytest.mark.parametrize("exp", ("smoke", "bimodal-tpu", "crossover-tpu"))
+def test_experiment_composes_on_cem(exp):
     with initialize_config_dir(config_dir=CONFIGS, version_base=None):
-        cfg = compose(config_name="cem", overrides=["+experiment=smoke"])
+        cfg = compose(config_name="cem", overrides=[f"+experiment={exp}"])
     # The experiment file re-roots over the primary (# @package _global_),
     # so its keys must all exist in the composed config -- and a CLI override
     # must still win over the experiment file.
     assert cfg.backend == "kaggle"
     with initialize_config_dir(config_dir=CONFIGS, version_base=None):
         cfg = compose(config_name="cem",
-                      overrides=["+experiment=smoke", "backend=local"])
+                      overrides=[f"+experiment={exp}", "backend=local"])
     assert cfg.backend == "local"
+
+
+def test_diagnostic_experiments_size_the_elite_pool():
+    """Both #70 experiments exist to read the bimodality diagnostic, and the
+    diagnostic refuses to fire below MIN_POOL elites (measured spurious rate
+    0.8% at n=6). An experiment file edited below that pool would complete
+    cleanly and report 'unimodal' as pure absence of power -- rule 7's shape
+    exactly."""
+    from search.blocks import MIN_POOL
+    for exp in ("bimodal-tpu", "crossover-tpu"):
+        with initialize_config_dir(config_dir=CONFIGS, version_base=None):
+            cfg = compose(config_name="cem", overrides=[f"+experiment={exp}"])
+        assert cfg.diagnostics is True
+        assert int(cfg.population * cfg.elite_frac) >= MIN_POOL, (
+            f"{exp}: {int(cfg.population * cfg.elite_frac)} elites/gen is "
+            f"below MIN_POOL={MIN_POOL}; the diagnostic cannot fire")
 
 
 @pytest.mark.parametrize("name", ("cem", "cmaes", "subspace"))

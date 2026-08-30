@@ -22,6 +22,11 @@ KNOWN_KEYS = frozenset({
     "train_pool", "holdout_seeds", "clean_seeds", "steps",
     "opponents", "reference", "fitness", "holdout_opponents",
     "rng_seed", "group", "wandb", "init_params_data", "init_spread",
+    # Issue #70. `machine` ships rather than being popped driver-side so the
+    # kernel can verify it actually landed on the tier it asked for -- a TPU
+    # request silently running on 4 cores would finish 24x slower with
+    # plausible numbers (rule 7).
+    "diagnostics", "crossover_frac", "machine",
 })
 
 # Present only on warm starts; everything else must always arrive.

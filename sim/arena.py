@@ -244,9 +244,12 @@ def main(cfg):
         breakdown = per_opponent(rows)
         for k, v in stats.items():
             run.summary[k] = v
+        # Same vs/{label}/ scheme as the search drivers -- the historical
+        # vs_{name}/ variant charted the SAME quantity on different panels
+        # (canonical key schema: obs/wandb_setup.py).
         for name, b in breakdown.items():
-            run.summary[f"vs_{name}/mean_bank"] = b["mean_bank"]
-            run.summary[f"vs_{name}/win_rate"] = b["win_rate"]
+            run.summary[f"vs/{name}/mean_bank"] = b["mean_bank"]
+            run.summary[f"vs/{name}/win_rate"] = b["win_rate"]
         if table is not None:
             run.log({"episodes": table})
 
